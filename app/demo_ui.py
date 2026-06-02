@@ -258,6 +258,7 @@ PAL: dict[str, str] = {
     "light_rain":             "#0099cc",   # 青蓝
     "moderate_rain":          "#004499",   # 深蓝
     "heavy_rain":             "#000033",   # 近黑蓝
+    "snow_layer":             "#6aa9e9",   # 雪蓝
 }
 
 # ---------------------------------------------------------------------------
@@ -465,6 +466,10 @@ def fig_rain_power(log: bool) -> dict:
         ]
     return {"data": traces,
             "layout": _layout("雨 — 回波功率 P(R)", "P(R)  (W)", log)}
+
+
+def fig_snow_power(log: bool) -> dict:
+    return {"data": [], "layout": _layout("雪 — 回波功率 P(R)", "P(R)  (W)", log)}
 
 
 def fig_all_power(log: bool) -> dict:
@@ -685,6 +690,7 @@ _SCENE_LABELS = {
     "light_rain": "小雨",
     "moderate_rain": "中雨",
     "heavy_rain": "大雨",
+    "snow_layer": "雪层",
 }
 
 _FIELD_LABELS = {
@@ -702,6 +708,10 @@ _FIELD_LABELS = {
     "m_real": "折射率实部",
     "m_imag": "折射率虚部",
     "rain_rate_mm_h": "降雨率",
+    "snow_depth_mm": "积雪厚度",
+    "snow_density_kg_m3": "雪层密度",
+    "liquid_water_content_pct": "液态水含量",
+    "impurity_content_ppb": "杂质含量",
 }
 
 
@@ -827,6 +837,13 @@ def _build_rain_editor(key: str, spec: dict) -> None:
     _num("降雨率 (mm/h)", spec.get("rain_rate_mm_h", 0.0), ("rain", key, "rain_rate_mm_h"), fmt="%.2f")
 
 
+def _build_snow_editor(key: str, spec: dict) -> None:
+    _num("积雪厚度 (mm)", spec.get("snow_depth_mm", 0.0), ("snow", key, "snow_depth_mm"), fmt="%.2f")
+    _num("雪层密度 (kg/m³)", spec.get("snow_density_kg_m3", 0.0), ("snow", key, "snow_density_kg_m3"), fmt="%.2f")
+    _num("液态水含量 (%)", spec.get("liquid_water_content_pct", 0.0), ("snow", key, "liquid_water_content_pct"), fmt="%.2f")
+    _num("杂质含量 (ppb)", spec.get("impurity_content_ppb", 0.0), ("snow", key, "impurity_content_ppb"), fmt="%.2f")
+
+
 # ---------------------------------------------------------------------------
 # Build param_overrides.json from current UI state
 # ---------------------------------------------------------------------------
@@ -837,6 +854,7 @@ def _collect_overrides() -> dict:
     fog: dict[str, dict] = {}
     haze: dict[str, dict] = {}
     rain: dict[str, dict] = {}
+    snow: dict[str, dict] = {}
     cli: dict[str, float] = {}
 
     for key, inp in _inputs.items():
@@ -852,6 +870,9 @@ def _collect_overrides() -> dict:
         elif key[0] == "rain":
             _, scenario, field = key
             rain.setdefault(scenario, {})[field] = float(val)
+        elif key[0] == "snow":
+            _, scenario, field = key
+            snow.setdefault(scenario, {})[field] = float(val)
         elif key[0] == "cli":
             _, field = key
             if field == "molecular-depol-ratio":
@@ -882,7 +903,7 @@ def _collect_overrides() -> dict:
         if inp is not None and inp.value is not None:
             instrument[field] = float(inp.value)
 
-    return {"fog": fog, "haze": haze, "rain": rain, "cli": cli, "instrument": instrument}
+    return {"fog": fog, "haze": haze, "rain": rain, "snow": snow, "cli": cli, "instrument": instrument}
 
 
 # ---------------------------------------------------------------------------
@@ -1700,6 +1721,14 @@ _DEFAULTS: dict = {
         "moderate_rain": {"rain_rate_mm_h": 5.0},
         "heavy_rain":    {"rain_rate_mm_h": 12.0},
     },
+    "snow": {
+        "snow_layer": {
+            "snow_depth_mm": 0.0,
+            "snow_density_kg_m3": 0.0,
+            "liquid_water_content_pct": 0.0,
+            "impurity_content_ppb": 0.0,
+        },
+    },
 }
 
 
@@ -1725,6 +1754,11 @@ def _reset_to_defaults() -> None:
             elif key[0] == "rain":
                 _, scenario, field = key
                 val = _DEFAULTS["rain"].get(scenario, {}).get(field)
+                if val is not None:
+                    inp.value = val
+            elif key[0] == "snow":
+                _, scenario, field = key
+                val = _DEFAULTS["snow"].get(scenario, {}).get(field)
                 if val is not None:
                     inp.value = val
             elif key[0] == "cli":
@@ -1789,6 +1823,11 @@ def _populate_inputs_from_summary(summary: dict) -> None:
             spec = summary.get("rain", {}).get(scenario, {}).get("spec", {})
             if field in spec:
                 inp.value = spec[field]
+        elif key[0] == "snow":
+            _, scenario, field = key
+            val = _DEFAULTS["snow"].get(scenario, {}).get(field)
+            if val is not None:
+                inp.value = val
         elif key[0] == "cli":
             _, field = key
             if field == "laser_peak_power_W":
@@ -1910,17 +1949,21 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                           ("dust_desert_haze","沙尘型霾"),
                           ("maritime_haze","海洋性霾")]
         RAIN_SCENARIOS = [("light_rain","小雨"),("moderate_rain","中雨"),("heavy_rain","大雨")]
+        SNOW_SCENARIOS = [("snow_layer", "雪层")]
 
         for cat, cat_icon, cat_label, scenes in [
             ("fog",  "water_drop", "雾 — 场景参数",  FOG_SCENARIOS),
             ("haze", "blur_on",    "霾 — 场景参数",  HAZE_SCENARIOS),
             ("rain", "grain",      "雨 — 场景参数",  RAIN_SCENARIOS),
+            ("snow", "ac_unit",    "雪 — 场景参数",  SNOW_SCENARIOS),
         ]:
             cat_data = summary.get(cat, {})
             with ui.expansion(cat_label, icon=cat_icon).classes("w-full"):
                 for key, label in scenes:
                     sc   = cat_data.get(key, {})
                     spec = sc.get("spec", {})
+                    if cat == "snow":
+                        spec = _DEFAULTS["snow"].get(key, {})
                     with ui.card().classes(
                         "w-full mb-2 p-2 bg-gray-50 shadow-none border border-gray-200"
                     ):
@@ -1947,6 +1990,8 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                         elif cat == "rain":
                             if spec:
                                 _build_rain_editor(key, spec)
+                        elif cat == "snow":
+                            _build_snow_editor(key, spec)
 
         # ── 重算控制区 ────────────────────────────────────────────────────
         ui.separator()
@@ -2144,6 +2189,7 @@ def _apply_params_json(params: dict, summary: dict) -> None:
     fog  = params.get("fog", {})
     haze = params.get("haze", {})
     rain = params.get("rain", {})
+    snow = params.get("snow", {})
     cli  = params.get("cli", {})
 
     for key, inp in _inputs.items():
@@ -2178,6 +2224,10 @@ def _apply_params_json(params: dict, summary: dict) -> None:
                 spec = summary.get("rain", {}).get(scenario, {}).get("spec", {})
                 if field in spec:
                     inp.value = spec[field]
+
+        elif key[0] == "snow":
+            _, scenario, field = key
+            inp.value = snow.get(scenario, {}).get(field, _DEFAULTS["snow"].get(scenario, {}).get(field, 0.0))
 
         elif key[0] == "cli":
             _, field = key
@@ -2266,7 +2316,7 @@ def index() -> None:
         "bg-slate-800 text-white items-center px-5 py-2 shadow-lg"
     ).style("min-height:48px"):
         ui.icon("radar", size="1.6rem")
-        ui.label("大气激光雷达散射特性仿真  ·  结果展示").classes(
+        ui.label("复杂大气环境激光散射和传输评估软件").classes(
             "text-base font-bold ml-2 tracking-wide"
         )
         ui.space()
@@ -2352,6 +2402,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
         t_haze  = ui.tab("霾 · 功率",   icon="blur_on")
         t_depol = ui.tab("霾 · 退偏",   icon="tune")
         t_rain  = ui.tab("雨 · 功率",   icon="grain")
+        t_snow  = ui.tab("雪 · 功率",   icon="ac_unit")
         t_all   = ui.tab("全场景对比",   icon="compare_arrows")
 
     # 记录标签页切换状态
@@ -2360,6 +2411,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
         t_haze: "霾 · 功率",
         t_depol: "霾 · 退偏",
         t_rain: "雨 · 功率",
+        t_snow: "雪 · 功率",
         t_all: "全场景对比",
     }
 
@@ -2379,6 +2431,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
             "霾 · 功率": t_haze,
             "霾 · 退偏": t_depol,
             "雨 · 功率": t_rain,
+            "雪 · 功率": t_snow,
             "全场景对比": t_all,
         }
         initial_tab = tab_map.get(last_active_tab, t_fog)
@@ -2452,6 +2505,18 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                            ("中雨","fig11b_ModerateRain.csv"),
                            ("大雨","fig11c_HeavyRain.csv")],
                 ref_images=[("图 11  小/中/大雨","fig11_rain_power")],
+                callbacks=callbacks,
+            )
+
+        with ui.tab_panel(t_snow):
+            chart_tab(
+                fig_builder=fig_snow_power,
+                allow_log=True, default_log=True,
+                summary=summary, cat="snow",
+                summary_keys=[("snow_layer", "雪层")],
+                show_depol=False,
+                csv_links=[],
+                ref_images=[],
                 callbacks=callbacks,
             )
 
@@ -2629,7 +2694,7 @@ if __name__ in {"__main__", "__mp_main__"}:
         sys.exit(1)
 
     ui.run(
-        title="大气激光雷达散射特性仿真",
+        title="复杂大气环境激光散射和传输评估软件",
         native=True,
         window_size=(1440, 900),
         reload=False,
