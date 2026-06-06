@@ -128,6 +128,15 @@ _EXPORT_CURVES: dict[str, tuple[str, str, str]] = {
     "fig11a_LightRain.csv":              ("rain_power.csv",                            "range_m", "light_rain_power_observed_raw"),
     "fig11b_ModerateRain.csv":           ("rain_power.csv",                            "range_m", "moderate_rain_power_observed_raw"),
     "fig11c_HeavyRain.csv":              ("rain_power.csv",                            "range_m", "heavy_rain_power_observed_raw"),
+    "fig1_RadiationFog_SNR.csv":             ("radiation_fog_power.csv",                   "range_m", "snr_db"),
+    "fig2_AdvectionFog_SNR.csv":             ("advection_fog_power.csv",                   "range_m", "snr_db"),
+    "fig3_UrbanIndustrialHaze_SNR.csv":      ("urban_industrial_haze_power.csv",           "range_m", "snr_db"),
+    "fig4_RuralContinentalHaze_SNR.csv":     ("rural_continental_haze_power.csv",          "range_m", "snr_db"),
+    "fig5_DustDesertHaze_SNR.csv":           ("dust_desert_haze_power.csv",                "range_m", "snr_db"),
+    "fig6_MaritimeHaze_SNR.csv":             ("maritime_haze_power.csv",                   "range_m", "snr_db"),
+    "fig11a_LightRain_SNR.csv":              ("rain_power.csv",                            "range_m", "light_rain_snr_db"),
+    "fig11b_ModerateRain_SNR.csv":           ("rain_power.csv",                            "range_m", "moderate_rain_snr_db"),
+    "fig11c_HeavyRain_SNR.csv":              ("rain_power.csv",                            "range_m", "heavy_rain_snr_db"),
 }
 
 
@@ -410,8 +419,21 @@ def _layout(title: str, y_label: str, log: bool) -> dict:
 # Figure builders
 # ---------------------------------------------------------------------------
 
+def _constant_trace(x: list, y: float, name: str, color: str, dash: str = "dash") -> dict:
+    return {
+        "type": "scatter",
+        "x": x,
+        "y": [y for _ in x],
+        "name": name,
+        "mode": "lines",
+        "line": {"color": color, "width": 1.3, "dash": dash},
+        "hovertemplate": "%{y:.4e}<extra>" + name + "</extra>",
+    }
+
+
 def fig_fog_power(log: bool) -> dict:
     traces = []
+    noise_floor_added = False
     for fname, label, key in [
         ("radiation_fog_power.csv", "辐射雾", "radiation_fog"),
         ("advection_fog_power.csv", "平流雾", "advection_fog"),
@@ -419,12 +441,16 @@ def fig_fog_power(log: bool) -> dict:
         d = load_csv(fname)
         if d:
             traces.append(_trace(d["range_m"], d["power_observed_raw"], label, PAL[key]))
+            if not noise_floor_added and d.get("noise_floor_rms_W"):
+                traces.append(_constant_trace(d["range_m"], d["noise_floor_rms_W"][0], "噪声底 RMS", "#666666"))
+                noise_floor_added = True
     return {"data": traces,
             "layout": _layout("雾 — 回波功率 P(R)", "P(R)  (W)", log)}
 
 
 def fig_haze_power(log: bool) -> dict:
     traces = []
+    noise_floor_added = False
     for fname, label, key in [
         ("urban_industrial_haze_power.csv",  "城市/工业型霾",     "urban_industrial_haze"),
         ("rural_continental_haze_power.csv", "乡村/大陆背景型霾", "rural_continental_haze"),
@@ -434,6 +460,9 @@ def fig_haze_power(log: bool) -> dict:
         d = load_csv(fname)
         if d:
             traces.append(_trace(d["range_m"], d["power_observed_raw"], label, PAL[key]))
+            if not noise_floor_added and d.get("noise_floor_rms_W"):
+                traces.append(_constant_trace(d["range_m"], d["noise_floor_rms_W"][0], "噪声底 RMS", "#666666"))
+                noise_floor_added = True
     return {"data": traces,
             "layout": _layout("霾 — 回波功率 P(R)", "P(R)  (W)", log)}
 
@@ -463,8 +492,59 @@ def fig_rain_power(log: bool) -> dict:
             _trace(d["range_m"], d["moderate_rain_power_observed_raw"], "中雨", PAL["moderate_rain"]),
             _trace(d["range_m"], d["heavy_rain_power_observed_raw"],    "大雨", PAL["heavy_rain"]),
         ]
+        if "light_rain_noise_floor_rms_W" in d:
+            traces.append(_constant_trace(d["range_m"], d["light_rain_noise_floor_rms_W"][0], "噪声底 RMS", "#666666"))
     return {"data": traces,
             "layout": _layout("雨 — 回波功率 P(R)", "P(R)  (W)", log)}
+
+
+def _threshold_trace(x: list[float], y: float, name: str, color: str) -> dict:
+    if not x:
+        return {}
+    return {
+        "type": "scatter",
+        "x": x,
+        "y": [y for _ in x],
+        "name": name,
+        "mode": "lines",
+        "line": {"color": color, "width": 1.2, "dash": "dash"},
+        "hovertemplate": "%{y:.2f} dB<extra>" + name + "</extra>",
+    }
+
+
+def fig_all_snr(log: bool = False) -> dict:  # noqa: ARG001
+    traces = []
+    x_ref: list[float] = []
+    for fname, label, key, dash in [
+        ("radiation_fog_power.csv",          "辐射雾",          "radiation_fog",          "solid"),
+        ("advection_fog_power.csv",          "平流雾",          "advection_fog",          "dot"),
+        ("urban_industrial_haze_power.csv",  "城市/工业型霾",   "urban_industrial_haze",  "solid"),
+        ("rural_continental_haze_power.csv", "乡村/大陆背景型霾", "rural_continental_haze", "dash"),
+        ("dust_desert_haze_power.csv",       "沙尘型霾",        "dust_desert_haze",       "dashdot"),
+        ("maritime_haze_power.csv",          "海洋性霾",        "maritime_haze",          "dot"),
+    ]:
+        d = load_csv(fname)
+        if d and "snr_db" in d:
+            x_ref = d["range_m"]
+            traces.append(_trace(d["range_m"], d["snr_db"], label, PAL[key], dash))
+    d = load_csv("rain_power.csv")
+    if d:
+        x_ref = d.get("range_m", x_ref)
+        for key, label, dash in [
+            ("light_rain", "小雨", "solid"),
+            ("moderate_rain", "中雨", "dash"),
+            ("heavy_rain", "大雨", "dashdot"),
+        ]:
+            col = f"{key}_snr_db"
+            if col in d:
+                traces.append(_trace(d["range_m"], d[col], label, PAL[key], dash))
+    for threshold, name in ((20.0 * math.log10(3.0), "SNR=3"), (20.0 * math.log10(10.0), "SNR=10")):
+        t = _threshold_trace(x_ref, threshold, name, "#555555")
+        if t:
+            traces.append(t)
+    base = _layout("全场景 — 信噪比 SNR(R)", "SNR (dB)", False)
+    base["margin"] = {"l": 65, "r": 20, "t": 80, "b": 55}
+    return {"data": traces, "layout": base}
 
 
 def fig_all_power(log: bool) -> dict:
@@ -522,13 +602,21 @@ def _ff(v, digits: int = 4) -> str:
     return f"{v:.{digits}f}" if isinstance(v, float) else "—"
 
 
-def render_summary_table(summary: dict, cat: str,
-                         keys: list[tuple[str, str]],
-                         show_depol: bool) -> None:
+def _summary_table_payload(summary: dict, cat: str,
+                           keys: list[tuple[str, str]],
+                           show_depol: bool,
+                           show_snr: bool = False) -> tuple[list[dict], list[dict]]:
     if not keys:
-        return
+        return [], []
     cat_data = summary.get(cat, {})
-    col_names = ["场景", "α_p  (m⁻¹)", "β_p  (m⁻¹sr⁻¹)", "S = α/β  (sr)"]
+    col_names = [
+        "场景",
+        "α_p  (m⁻¹)",
+        "β_p  (m⁻¹sr⁻¹)",
+        "S = α/β  (sr)",
+    ]
+    if show_snr:
+        col_names += ["SNR@1km (dB)", "R(SNR≥3)", "R(SNR≥10)"]
     if show_depol:
         col_names.append("退偏比  δ")
 
@@ -544,15 +632,39 @@ def render_summary_table(summary: dict, cat: str,
             "β_p  (m⁻¹sr⁻¹)": _fsc(β),
             "S = α/β  (sr)":   _ff(S),
         }
+        if show_snr:
+            snr = sc.get("snr_summary", {}) if isinstance(sc.get("snr_summary"), dict) else {}
+            row["SNR@1km (dB)"] = _ff(snr.get("snr_db_at_1000m"), digits=2)
+            row["R(SNR≥3)"] = f"{snr.get('max_range_snr_ge_3'):.0f} m" if isinstance(snr.get("max_range_snr_ge_3"), float) else "—"
+            row["R(SNR≥10)"] = f"{snr.get('max_range_snr_ge_10'):.0f} m" if isinstance(snr.get("max_range_snr_ge_10"), float) else "—"
         if show_depol:
             row["退偏比  δ"] = _ff(sc.get("depol_ratio"))
         rows.append(row)
 
-    ui.table(
-        columns=[{"name": c, "label": c, "field": c, "align": "left"}
-                 for c in col_names],
+    columns = [{"name": c, "label": c, "field": c, "align": "left"}
+               for c in col_names]
+    return columns, rows
+
+
+def render_summary_table(summary: dict, cat: str,
+                         keys: list[tuple[str, str]],
+                         show_depol: bool,
+                         show_snr: bool = False):
+    columns, rows = _summary_table_payload(summary, cat, keys, show_depol, show_snr)
+    return ui.table(
+        columns=columns,
         rows=rows,
     ).classes("w-full text-xs").props("dense flat bordered separator=cell")
+
+
+def refresh_summary_table(table, summary: dict, cat: str,
+                          keys: list[tuple[str, str]],
+                          show_depol: bool,
+                          show_snr: bool = False) -> None:
+    columns, rows = _summary_table_payload(summary, cat, keys, show_depol, show_snr)
+    table.columns = columns
+    table.rows = rows
+    table.update()
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +722,19 @@ def chart_tab(
         # ── numerical summary ─────────────────────────────────────────────
         with ui.expansion("数值摘要", icon="table_chart",
                           value=True).classes("w-full"):
-            render_summary_table(summary, cat, summary_keys, show_depol)
+            summary_table = render_summary_table(summary, cat, summary_keys, show_depol)
+
+        def redraw_summary() -> None:
+            refresh_summary_table(
+                summary_table,
+                load_summary(),
+                cat,
+                summary_keys,
+                show_depol,
+            )
+
+        if callbacks is not None:
+            callbacks.append(redraw_summary)
 
         # ── reference images ──────────────────────────────────────────────
         if ref_images:
@@ -702,6 +826,14 @@ _FIELD_LABELS = {
     "m_real": "折射率实部",
     "m_imag": "折射率虚部",
     "rain_rate_mm_h": "降雨率",
+    "enabled": "启用噪声",
+    "quantum_efficiency": "量子效率",
+    "background_power_W": "背景光功率",
+    "dark_current_A": "暗电流",
+    "read_noise_e": "读出噪声",
+    "average_pulses": "平均脉冲数",
+    "generate_noisy_curve": "带噪曲线",
+    "random_seed": "随机种子",
 }
 
 
@@ -732,6 +864,8 @@ def _impact_scope_text(key: tuple) -> str:
         return "影响：雨光学"
     elif key[0] == "haze":
         return "影响：霾光学、Mueller 与高耗时散射"
+    elif key[0] == "noise":
+        return "影响：噪声底与 SNR"
     return ""
 
 
@@ -769,6 +903,8 @@ def _state_key_label(key: tuple) -> str:
     if section == "haze":
         _, scenario, mode_name, field = key
         return f"{_SCENE_LABELS.get(scenario, scenario)} / {mode_name} / {_FIELD_LABELS.get(field, field)}"
+    if section == "noise":
+        return f"噪声 / {_FIELD_LABELS.get(key[1], str(key[1]))}"
     return " / ".join(str(part) for part in key)
 
 
@@ -790,6 +926,16 @@ def _num(label: str, value: float, state_key: tuple, *,
     inp.on_value_change(lambda _e: _trigger_plan_refresh())
 
 
+def _switch(label: str, value: bool, state_key: tuple) -> None:
+    with ui.row().classes("items-center justify-between w-full"):
+        ui.html(f"<span class='text-sm text-gray-500'>{label}</span>")
+        inp = ui.switch(value=bool(value)).props("dense")
+    impact_label = ui.label("").classes("text-[11px] text-gray-400 pl-28 hidden")
+    _inputs[state_key] = inp
+    _input_impact_labels[state_key] = impact_label
+    inp.on_value_change(lambda _e: _trigger_plan_refresh())
+
+
 def _build_instrument_editor(g: dict) -> None:
     inst = g.get("instrument_parameters", {})
     _num("λ  (nm)",     g.get("wavelength_nm", 1550.0),         ("cli", "wavelength_nm"))
@@ -797,6 +943,9 @@ def _build_instrument_editor(g: dict) -> None:
     _num("τ  (s)",      inst.get("pulse_width_s", 2e-7),        ("cli", "pulse_width_s"), fmt="%.3e")
     _num("r  (m)",      inst.get("receiver_radius_m", 0.05),    ("cli", "receiver_radius_m"), fmt="%.4f")
     _num("η",           inst.get("optical_efficiency", 0.8),    ("cli", "optical_efficiency"), fmt="%.4f")
+    ui.separator().classes("my-2")
+    ui.label("接收端噪声 / SNR").classes("text-xs font-semibold text-gray-500")
+    _build_noise_editor(g)
 
 
 def _build_global_editor(g: dict) -> None:
@@ -805,6 +954,18 @@ def _build_global_editor(g: dict) -> None:
          ("cli", "beta_mol"), fmt="%.3e")
     _num("δ<sub>mol</sub>",       g.get("molecular_depolarization_ratio", 0.00365), ("cli", "molecular-depol-ratio"),
          fmt="%.5f")
+
+
+def _build_noise_editor(g: dict) -> None:
+    noise = g.get("noise_model", {})
+    _switch("启用噪声模型", noise.get("enabled", True), ("noise", "enabled"))
+    _num("量子效率 ηq", noise.get("quantum_efficiency", 0.6), ("noise", "quantum_efficiency"), fmt="%.4f")
+    _num("背景光功率 (W)", noise.get("background_power_W", 1.0e-12), ("noise", "background_power_W"), fmt="%.3e")
+    _num("暗电流 (A)", noise.get("dark_current_A", 1.0e-9), ("noise", "dark_current_A"), fmt="%.3e")
+    _num("读出噪声 (e⁻)", noise.get("read_noise_e", 10.0), ("noise", "read_noise_e"), fmt="%.3g")
+    _num("平均脉冲数", noise.get("average_pulses", 1000), ("noise", "average_pulses"), fmt="%.0f")
+    _switch("生成带噪曲线", noise.get("generate_noisy_curve", False), ("noise", "generate_noisy_curve"))
+    _num("随机种子", noise.get("random_seed", 202606) or 0, ("noise", "random_seed"), fmt="%.0f")
 
 
 def _build_fog_editor(key: str, spec: dict) -> None:
@@ -838,6 +999,7 @@ def _collect_overrides() -> dict:
     haze: dict[str, dict] = {}
     rain: dict[str, dict] = {}
     cli: dict[str, float] = {}
+    noise: dict[str, object] = {}
 
     for key, inp in _inputs.items():
         val = inp.value
@@ -862,6 +1024,14 @@ def _collect_overrides() -> dict:
                 cli["alpha-mol"] = float(val)
             elif field == "beta_mol":
                 cli["beta-mol"] = float(val)
+        elif key[0] == "noise":
+            _, field = key
+            if field in {"enabled", "generate_noisy_curve"}:
+                noise[field] = bool(val)
+            elif field in {"average_pulses", "random_seed"}:
+                noise[field] = int(float(val))
+            else:
+                noise[field] = float(val)
     # system_constant from instrument params
     p0   = _inputs.get(("cli", "laser_peak_power_W"))
     tau  = _inputs.get(("cli", "pulse_width_s"))
@@ -881,6 +1051,8 @@ def _collect_overrides() -> dict:
         inp = _inputs.get(("cli", field))
         if inp is not None and inp.value is not None:
             instrument[field] = float(inp.value)
+    if noise:
+        instrument["receiver_noise"] = noise
 
     return {"fog": fog, "haze": haze, "rain": rain, "cli": cli, "instrument": instrument}
 
@@ -915,13 +1087,15 @@ def _compute_current_identity(precision: str) -> dict | None:
         mueller_key = cache_keys.haze_mueller_key(haze_specs, args)
         rain_key = cache_keys.rain_cache_key(rain_specs, args)
         instr_hash = cache_keys.instrument_hash(overrides.get("instrument", {}))
-        identity = cache_keys.compose_run_identity(fog_key, haze_key, mueller_key, rain_key, instr_hash)
+        noise_hash = cache_keys.noise_hash_from_overrides(overrides)
+        identity = cache_keys.compose_run_identity(fog_key, haze_key, mueller_key, rain_key, instr_hash, noise_hash)
         return {
             "fog_key": fog_key,
             "haze_key": haze_key,
             "haze_mueller_key": mueller_key,
             "rain_key": rain_key,
             "instrument_hash": instr_hash,
+            "noise_hash": noise_hash,
             "identity": identity,
             "precision_profile": precision,
         }
@@ -1005,6 +1179,12 @@ def _format_override_value(key: tuple, value) -> str:
             return _compact_num(value, sig=4)
         if key[0] == "rain" and key[-1] == "rain_rate_mm_h":
             return f"{_compact_num(value)} mm/h"
+        if key[0] == "noise":
+            if key[1] in {"enabled", "generate_noisy_curve"}:
+                return "开" if bool(value) else "关"
+            if key[1] == "average_pulses":
+                return f"{int(float(value))}"
+            return _compact_num(value)
         return _compact_num(value)
     return str(value)
 
@@ -1024,6 +1204,12 @@ def _reference_value_for_key(summary: dict, key: tuple):
             return _beta_mol_input_from_global(g)
         if field == "molecular-depol-ratio":
             return g.get("molecular_depolarization_ratio")
+    if key[0] == "noise":
+        _, field = key
+        noise = g.get("noise_model", {})
+        if field == "random_seed":
+            return noise.get(field, 202606)
+        return noise.get(field)
     if key[0] == "fog":
         _, scenario, field = key
         return summary.get("fog", {}).get(scenario, {}).get("spec", {}).get(field)
@@ -1071,7 +1257,19 @@ def _history_label(run_id: str, entry: dict | None = None) -> str:
         ts_str = str(ts)
 
     precision_label = _history_precision_label(entry)
+    custom_name = cache_runtime.history_entry_custom_name(entry)
+    if custom_name:
+        return f"{custom_name} · {ts_str} | {precision_label}"
     return f"{ts_str} | {precision_label}"
+
+
+def _history_entry(run_id: str | None) -> dict | None:
+    if not run_id or run_id == _DEFAULT_RESULT_ID:
+        return None
+    for entry in _load_manifest().get("runs", []):
+        if entry.get("id") == run_id:
+            return entry
+    return None
 
 
 def _history_precision_label(entry: dict) -> str:
@@ -1166,6 +1364,16 @@ def _detect_changes() -> tuple[bool, bool]:
             ref = spec.get(field)
             if ref is None or not _close(val, ref):
                 physics_changed = True
+
+        elif key[0] == "noise":
+            _, field = key
+            noise = g.get("noise_model", {})
+            ref = noise.get(field)
+            if field in {"enabled", "generate_noisy_curve"}:
+                if ref is None or bool(inp.value) != bool(ref):
+                    instrument_changed = True
+            elif ref is None or not _close(val, ref):
+                instrument_changed = True
 
         elif key[0] == "haze":
             _, scenario, mode_name, field = key
@@ -1270,8 +1478,8 @@ def _log_append(buf: list[str], line: str) -> None:
     if len(buf) > _LOG_BUF_MAX_LINES:
         del buf[:len(buf) - _LOG_BUF_MAX_LINES]
 
-# History selector element — set once the left panel is built so callbacks can update it
-_history_select_ref: list = []  # holds [ui.select] when ready
+# History panel refresh hook — set once the left panel is built so callbacks can update it
+_history_refresh_ref: list = []  # holds [callable(run_id=None)] when ready
 
 # UI 状态持久化（用于窗口切换后恢复）
 _ui_state: dict = {}  # 模块级状态，页面重建时保留
@@ -1393,9 +1601,7 @@ async def _do_recompute(status_label: ui.label, log_buf: list,
                         payload={"run_id": _id_run_id, "reason": str(exc)},
                     )
             elif _id_status == "optical_only":
-                # TODO: instrument-only fast path — 仅 P0/τ/r/η 变化时跳过 Mie/T-matrix,
-                #       只重算辐射量。目前的实现先 fall through 到完整重算,但已经把
-                #       判定钩好,后续 PR 直接在这里调 --reuse-optical-cache 类参数即可。
+                # 当前实现对仅仪器参数变化的场景仍执行完整重算。
                 _diag_event(
                     "identity_optical_only",
                     payload={"run_id": (_id_record or {}).get("run_id")},
@@ -1627,14 +1833,8 @@ async def _do_recompute(status_label: ui.label, log_buf: list,
             )
 
             # 以下都是 UI 更新，client 断开会失败但不影响业务
-            if _history_select_ref:
-                def _refresh_select():
-                    sel = _history_select_ref[0]
-                    sel.options = _history_options()
-                    sel.value   = run_id
-                    sel.enable()
-                    sel.update()
-                _safe_ui(client, _refresh_select)
+            if _history_refresh_ref:
+                _safe_ui(client, _history_refresh_ref[0], run_id)
 
             _safe_call(status_label.set_text, "完成 ✓")
             _safe_call(status_label.classes, remove="text-blue-600 text-red-600", add="text-green-600")
@@ -1700,10 +1900,20 @@ _DEFAULTS: dict = {
         "moderate_rain": {"rain_rate_mm_h": 5.0},
         "heavy_rain":    {"rain_rate_mm_h": 12.0},
     },
+    "noise": {
+        "enabled": True,
+        "quantum_efficiency": 0.6,
+        "background_power_W": 1.0e-12,
+        "dark_current_A": 1.0e-9,
+        "read_noise_e": 10.0,
+        "average_pulses": 1000,
+        "generate_noisy_curve": False,
+        "random_seed": 202606,
+    },
 }
 
 
-def _reset_to_defaults() -> None:
+def _reset_to_defaults(refresh_callbacks: list | None = None) -> None:
     """Load default result set (read-only, no new history entry)."""
 
     # 1. Check if default result set exists
@@ -1732,6 +1942,11 @@ def _reset_to_defaults() -> None:
                 val = _DEFAULTS.get(field)
                 if val is not None:
                     inp.value = val
+            elif key[0] == "noise":
+                _, field = key
+                val = _DEFAULTS["noise"].get(field)
+                if val is not None:
+                    inp.value = val
         _trigger_plan_refresh()
         ui.notify("已恢复默认参数（无预生成结果）", type="info")
         return
@@ -1757,13 +1972,15 @@ def _reset_to_defaults() -> None:
         OVERRIDES.unlink()
 
     # 5. Update history selector to show "默认"
-    if _history_select_ref:
-        sel = _history_select_ref[0]
-        sel.options = _history_options()
-        sel.value = _DEFAULT_RESULT_ID
-        sel.update()
+    if _history_refresh_ref:
+        _history_refresh_ref[0](_DEFAULT_RESULT_ID)
 
     _trigger_plan_refresh()
+    for cb in refresh_callbacks or []:
+        try:
+            cb()
+        except Exception as _cb_err:
+            print(f"[warn] reset refresh callback error: {_cb_err}")
 
     ui.notify("已加载默认结果集", type="positive")
 
@@ -1815,6 +2032,13 @@ def _populate_inputs_from_summary(summary: dict) -> None:
             elif field == "molecular-depol-ratio":
                 v = g.get("molecular_depolarization_ratio")
                 if v is not None: inp.value = v
+        elif key[0] == "noise":
+            _, field = key
+            noise = g.get("noise_model", {})
+            if field in noise:
+                inp.value = noise[field]
+            elif field in _DEFAULTS["noise"]:
+                inp.value = _DEFAULTS["noise"][field]
 
 
 # ---------------------------------------------------------------------------
@@ -1847,12 +2071,89 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
             ).props("dense outlined").classes("w-full text-xs")
             if not hist_opts:
                 hist_select.disable()
-                ui.label("（尚无历史记录，重算后自动填入）").classes("text-xs text-gray-400 italic mt-1")
-            elif active_id in hist_opts:
-                ui.label(f"当前：{hist_opts[active_id]}").classes("text-xs text-gray-500 mt-1")
+            current_history_label = ui.label(
+                f"当前：{hist_opts[active_id]}" if active_id in hist_opts else "（尚无历史记录，重算后自动填入）"
+            ).classes("text-xs text-gray-500 mt-1")
+            history_name_input = ui.input(
+                "存档名称",
+                placeholder="可选命名，不影响计算结果",
+            ).props("dense outlined clearable maxlength=40").classes("w-full text-xs")
+            with ui.row().classes("gap-2 flex-wrap"):
+                save_history_name_btn = ui.button("保存名称", icon="save").props("dense flat").classes("text-xs")
+                clear_history_name_btn = ui.button("清除名称", icon="backspace").props("dense flat").classes("text-xs")
 
-            _history_select_ref.clear()
-            _history_select_ref.append(hist_select)
+            def _refresh_history_name_controls(run_id: str | None) -> None:
+                options = _history_options()
+                if run_id and run_id in options:
+                    current_history_label.text = f"当前：{options[run_id]}"
+                elif options:
+                    current_history_label.text = "请选择仿真存档"
+                else:
+                    current_history_label.text = "（尚无历史记录，重算后自动填入）"
+                current_history_label.update()
+
+                entry = _history_entry(run_id)
+                if entry is None:
+                    history_name_input.value = ""
+                    history_name_input.disable()
+                    save_history_name_btn.disable()
+                    clear_history_name_btn.disable()
+                    history_name_input.update()
+                    return
+
+                history_name_input.enable()
+                save_history_name_btn.enable()
+                clear_history_name_btn.enable()
+                history_name_input.value = cache_runtime.history_entry_custom_name(entry)
+                history_name_input.update()
+
+            def _refresh_history_select(run_id: str | None = None) -> None:
+                options = _history_options()
+                hist_select.options = options
+                if options:
+                    selected = run_id if run_id in options else hist_select.value
+                    hist_select.value = selected if selected in options else next(iter(options), None)
+                    hist_select.enable()
+                else:
+                    hist_select.value = None
+                    hist_select.disable()
+                hist_select.update()
+                _refresh_history_name_controls(hist_select.value)
+
+            _history_refresh_ref.clear()
+            _history_refresh_ref.append(_refresh_history_select)
+
+            def _save_history_name() -> None:
+                run_id = hist_select.value
+                if not run_id or run_id == _DEFAULT_RESULT_ID:
+                    ui.notify("默认结果不可重命名", type="warning")
+                    return
+                try:
+                    cache_runtime.rename_history_run(run_id, history_name_input.value or "")
+                except Exception as _err:
+                    ui.notify(f"保存名称失败: {_err}", type="negative")
+                    return
+                _refresh_history_select(run_id)
+                _trigger_plan_refresh()
+                ui.notify("已保存存档名称", type="positive")
+
+            def _clear_history_name() -> None:
+                run_id = hist_select.value
+                if not run_id or run_id == _DEFAULT_RESULT_ID:
+                    ui.notify("默认结果不可重命名", type="warning")
+                    return
+                try:
+                    cache_runtime.rename_history_run(run_id, "")
+                except Exception as _err:
+                    ui.notify(f"清除名称失败: {_err}", type="negative")
+                    return
+                _refresh_history_select(run_id)
+                _trigger_plan_refresh()
+                ui.notify("已清除存档名称", type="info")
+
+            save_history_name_btn.on_click(_save_history_name)
+            clear_history_name_btn.on_click(_clear_history_name)
+            _refresh_history_name_controls(hist_select.value)
 
             def _on_history_change(e) -> None:
                 run_id = e.value
@@ -1889,6 +2190,7 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                         print(f"[warn] history chart refresh error: {_cb_err}")
                 _trigger_plan_refresh()
                 display = _history_options().get(run_id, run_id)
+                _refresh_history_name_controls(run_id)
                 ui.notify(f"已切换到存档 {display}", type="info")
 
             hist_select.on_value_change(_on_history_change)
@@ -2041,7 +2343,7 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
 
             log_btn.on_click(_open_log)
 
-            reset_btn.on_click(lambda: _reset_to_defaults())
+            reset_btn.on_click(lambda: _reset_to_defaults(chart_refresh_callbacks))
 
             # Pre-recompute confirmation dialog
             with ui.dialog() as confirm_dialog, ui.card().classes("p-6 gap-4"):
@@ -2145,6 +2447,8 @@ def _apply_params_json(params: dict, summary: dict) -> None:
     haze = params.get("haze", {})
     rain = params.get("rain", {})
     cli  = params.get("cli", {})
+    saved_instrument = params.get("instrument", {})
+    noise_params = saved_instrument.get("receiver_noise", params.get("noise", {})) if isinstance(saved_instrument, dict) else params.get("noise", {})
 
     for key, inp in _inputs.items():
         if key[0] == "fog":
@@ -2212,6 +2516,17 @@ def _apply_params_json(params: dict, summary: dict) -> None:
             cli_val = cli.get(cli_key)
             if cli_val is not None:
                 inp.value = cli_val
+
+        elif key[0] == "noise":
+            _, field = key
+            g = summary.get("global", {})
+            noise_summary = g.get("noise_model", {})
+            if field in noise_params:
+                inp.value = noise_params[field]
+            elif field in noise_summary:
+                inp.value = noise_summary[field]
+            elif field in _DEFAULTS["noise"]:
+                inp.value = _DEFAULTS["noise"][field]
 
 
 # ---------------------------------------------------------------------------
@@ -2352,6 +2667,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
         t_haze  = ui.tab("霾 · 功率",   icon="blur_on")
         t_depol = ui.tab("霾 · 退偏",   icon="tune")
         t_rain  = ui.tab("雨 · 功率",   icon="grain")
+        t_snr   = ui.tab("信噪比",      icon="show_chart")
         t_all   = ui.tab("全场景对比",   icon="compare_arrows")
 
     # 记录标签页切换状态
@@ -2360,6 +2676,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
         t_haze: "霾 · 功率",
         t_depol: "霾 · 退偏",
         t_rain: "雨 · 功率",
+        t_snr: "信噪比",
         t_all: "全场景对比",
     }
 
@@ -2379,6 +2696,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
             "霾 · 功率": t_haze,
             "霾 · 退偏": t_depol,
             "雨 · 功率": t_rain,
+            "信噪比": t_snr,
             "全场景对比": t_all,
         }
         initial_tab = tab_map.get(last_active_tab, t_fog)
@@ -2455,6 +2773,55 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                 callbacks=callbacks,
             )
 
+        with ui.tab_panel(t_snr):
+            with ui.card().classes("w-full p-4 shadow-none border"):
+                ui.label("全场景信噪比 SNR").classes("font-semibold text-sm text-gray-700 mb-2")
+                snr_plotly = ui.plotly(fig_all_snr()).classes("w-full")
+
+            with ui.expansion("SNR 数值摘要", icon="table_chart", value=True).classes("w-full"):
+                ui.label("雾").classes("text-xs font-semibold text-gray-500 mt-1")
+                snr_fog_keys = [("radiation_fog","辐射雾"),("advection_fog","平流雾")]
+                snr_fog_table = render_summary_table(summary,"fog",snr_fog_keys,show_depol=False, show_snr=True)
+                ui.label("霾").classes("text-xs font-semibold text-gray-500 mt-2")
+                snr_haze_keys = [("urban_industrial_haze","城市/工业型霾"),
+                                 ("rural_continental_haze","乡村/大陆背景型霾"),
+                                 ("dust_desert_haze","沙尘型霾"),
+                                 ("maritime_haze","海洋性霾")]
+                snr_haze_table = render_summary_table(summary,"haze",snr_haze_keys,show_depol=True, show_snr=True)
+                ui.label("雨").classes("text-xs font-semibold text-gray-500 mt-2")
+                snr_rain_keys = [("light_rain","小雨"),("moderate_rain","中雨"),("heavy_rain","大雨")]
+                snr_rain_table = render_summary_table(summary,"rain",snr_rain_keys,show_depol=False, show_snr=True)
+
+            def redraw_snr() -> None:
+                current_summary = load_summary()
+                snr_plotly.update_figure(fig_all_snr())
+                refresh_summary_table(snr_fog_table, current_summary, "fog", snr_fog_keys, show_depol=False, show_snr=True)
+                refresh_summary_table(snr_haze_table, current_summary, "haze", snr_haze_keys, show_depol=True, show_snr=True)
+                refresh_summary_table(snr_rain_table, current_summary, "rain", snr_rain_keys, show_depol=False, show_snr=True)
+
+            with ui.row().classes("items-center gap-3 flex-wrap pt-1"):
+                ui.label("SNR 数据下载：").classes("text-sm text-gray-500 font-medium")
+                for label, export_name in [
+                    ("辐射雾", "fig1_RadiationFog_SNR.csv"),
+                    ("平流雾", "fig2_AdvectionFog_SNR.csv"),
+                    ("城市霾", "fig3_UrbanIndustrialHaze_SNR.csv"),
+                    ("乡村霾", "fig4_RuralContinentalHaze_SNR.csv"),
+                    ("沙尘霾", "fig5_DustDesertHaze_SNR.csv"),
+                    ("海洋霾", "fig6_MaritimeHaze_SNR.csv"),
+                    ("小雨", "fig11a_LightRain_SNR.csv"),
+                    ("中雨", "fig11b_ModerateRain_SNR.csv"),
+                    ("大雨", "fig11c_HeavyRain_SNR.csv"),
+                ]:
+                    curve = _EXPORT_CURVES.get(export_name)
+                    if curve and (_DATA_DIR() / curve[0]).exists():
+                        async def _dl_snr(_name=export_name) -> None:
+                            data = _build_csv_bytes(_name, _DATA_DIR())
+                            if data is not None:
+                                await _native_save(data, _name, [("CSV file", "*.csv")])
+                        ui.button(f"↓ {label}", on_click=_dl_snr).props("dense flat").classes("text-sm font-mono text-green-700")
+
+            callbacks.append(redraw_snr)
+
         with ui.tab_panel(t_all):
             log_state_all = [True]
 
@@ -2482,18 +2849,28 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
 
             with ui.expansion("全场景数值摘要", icon="table_chart", value=True).classes("w-full"):
                 ui.label("雾").classes("text-xs font-semibold text-gray-500 mt-1")
-                render_summary_table(summary,"fog",[("radiation_fog","辐射雾"),("advection_fog","平流雾")],show_depol=False)
+                all_fog_keys = [("radiation_fog","辐射雾"),("advection_fog","平流雾")]
+                all_fog_table = render_summary_table(summary,"fog",all_fog_keys,show_depol=False)
                 ui.label("霾").classes("text-xs font-semibold text-gray-500 mt-2")
-                render_summary_table(summary,"haze",[("urban_industrial_haze","城市/工业型霾"),
-                                                     ("rural_continental_haze","乡村/大陆背景型霾"),
-                                                     ("dust_desert_haze","沙尘型霾"),
-                                                     ("maritime_haze","海洋性霾")],show_depol=True)
+                all_haze_keys = [("urban_industrial_haze","城市/工业型霾"),
+                                 ("rural_continental_haze","乡村/大陆背景型霾"),
+                                 ("dust_desert_haze","沙尘型霾"),
+                                 ("maritime_haze","海洋性霾")]
+                all_haze_table = render_summary_table(summary,"haze",all_haze_keys,show_depol=True)
                 ui.label("雨").classes("text-xs font-semibold text-gray-500 mt-2")
-                render_summary_table(summary,"rain",[("light_rain","小雨"),("moderate_rain","中雨"),("heavy_rain","大雨")],show_depol=False)
+                all_rain_keys = [("light_rain","小雨"),("moderate_rain","中雨"),("heavy_rain","大雨")]
+                all_rain_table = render_summary_table(summary,"rain",all_rain_keys,show_depol=False)
+
+            def redraw_all_summary() -> None:
+                current_summary = load_summary()
+                refresh_summary_table(all_fog_table, current_summary, "fog", all_fog_keys, show_depol=False)
+                refresh_summary_table(all_haze_table, current_summary, "haze", all_haze_keys, show_depol=True)
+                refresh_summary_table(all_rain_table, current_summary, "rain", all_rain_keys, show_depol=False)
 
     # Register "全场景对比" redraws into the callback list.
     callbacks.append(redraw_all_power)
     callbacks.append(redraw_all_depol)
+    callbacks.append(redraw_all_summary)
 
 
 # ---------------------------------------------------------------------------
@@ -2598,9 +2975,9 @@ if __name__ in {"__main__", "__mp_main__"}:
         for i, err in enumerate(check_errors, 1):
             error_msg += f"{i}. {err}\n"
         error_msg += "\n建议：\n"
-        error_msg += "- 检查安装目录权限（需要读写权限）\n"
-        error_msg += "- 确认 postinstall.ps1 已成功执行\n"
-        error_msg += "- 查看 postinstall.log 和 LidarSim.log\n"
+        error_msg += "- 检查当前目录读写权限\n"
+        error_msg += "- 确认 pixi 环境已初始化\n"
+        error_msg += "- 确认 Julia 可执行文件可用，并且 julia_depot 已就位\n"
 
         # 写入日志文件
         log_file = ROOT / "startup_check_failed.log"

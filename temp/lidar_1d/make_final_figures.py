@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Pinned final-run wrapper for the temp 1D lidar figure workflow.
+"""Pinned wrapper for the packaged 1D lidar workflow.
 
 This script intentionally does not implement any physics or plotting logic. It
-only forwards a fixed, reviewed parameter set to lidar_1d_simulation.py so the
-final figures can be regenerated without copying a long command line.
+only forwards a fixed parameter set to lidar_1d_simulation.py so the
+standard figures can be regenerated without copying a long command line.
 """
 
 from __future__ import annotations
@@ -37,6 +37,35 @@ _DIAG_LOGGER = new_component_logger(_DIAG_SESSION, "simulation_1d")
 def _diag_event(stage: str, *, status: str = "ok", elapsed_ms: float | None = None, payload: dict | None = None) -> None:
     _DIAG_LOGGER.event(stage, status=status, elapsed_ms=elapsed_ms, payload=payload)
     _DIAG_SESSION.write_component_event("compute_timeline.jsonl", stage, status=status, elapsed_ms=elapsed_ms, payload=payload)
+
+
+def _display_path(value: str | Path) -> str:
+    path = Path(value)
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    try:
+        rel = resolved.relative_to(ROOT.resolve())
+        return "." if not str(rel) else str(rel)
+    except Exception:
+        return resolved.name or str(value)
+
+
+def _sanitize_cmd_token(token: object) -> str:
+    text = str(token)
+    if any(sep in text for sep in ("\\", "/")):
+        return _display_path(text)
+    return text
+
+
+def _sanitized_command(tokens: list[object]) -> str:
+    return " ".join(_sanitize_cmd_token(token) for token in tokens)
+
+
+def _sanitized_command_list(tokens: list[object]) -> list[str]:
+    return [_sanitize_cmd_token(token) for token in tokens]
+
 
 def load_cli_overrides() -> list[str]:
     """Return extra CLI args from param_overrides.json "cli" section, if present."""
@@ -178,13 +207,13 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the pinned final temp/lidar_1d figure preset without changing algorithms."
+        description="Run the packaged temp/lidar_1d figure preset."
     )
     parser.add_argument(
         "--preset",
         choices=["local"],
         default="local",
-        help="Named fixed run for the current eleven-figure report.",
+        help="Named fixed run preset.",
     )
     parser.add_argument(
         "--precision",
@@ -196,7 +225,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python-cmd", default=sys.executable)
     parser.add_argument("--clean", action="store_true", help="Forward --clean to the underlying simulation script.")
     parser.add_argument("--dry-run", action="store_true", help="Print the resolved command and exit.")
-    parser.add_argument("--generate-seeds", action="store_true", help="Generate hidden seed snapshots for all precision presets.")
+    parser.add_argument("--generate-seeds", action="store_true", help="Generate cached seed snapshots for all precision presets.")
     return parser.parse_args()
 
 
@@ -240,13 +269,13 @@ def main() -> int:
     )
     cmd = build_command(args)
     print("[make_final_figures] command:")
-    print(" ".join(cmd))
+    print(_sanitized_command(cmd))
     _diag_event(
         "precision_preset_resolved",
         payload={
             "precision": args.precision,
-            "command": cmd,
-            "output": str(Path(args.output).resolve() if args.output else default_output_for(args.preset).resolve()),
+            "command": _sanitized_command_list(cmd),
+            "output": _display_path(Path(args.output).resolve() if args.output else default_output_for(args.preset).resolve()),
             "diagnostics_phase": diag_phase,
         },
     )
@@ -254,11 +283,11 @@ def main() -> int:
         if args.generate_seeds:
             for cmd in build_seed_commands(args):
                 print("[make_final_figures] seed command:")
-                print(" ".join(cmd))
+                print(_sanitized_command(cmd))
         else:
             print("[make_final_figures] command:")
-            print(" ".join(cmd))
-        _DIAG_SESSION.update_summary("simulation_1d", {"dry_run": True, "command": cmd, "diagnostics_phase": diag_phase}, status="success")
+            print(_sanitized_command(cmd))
+        _DIAG_SESSION.update_summary("simulation_1d", {"dry_run": True, "command": _sanitized_command_list(cmd), "diagnostics_phase": diag_phase}, status="success")
         return 0
     env = os.environ.copy()
     if args.generate_seeds:
@@ -267,12 +296,12 @@ def main() -> int:
             output = seed_output_for(precision)
             if args.clean and output.exists():
                 shutil.rmtree(output)
-            _diag_event("seed_run_started", status="begin", payload={"precision": precision, "output": str(output), "diagnostics_phase": diag_phase})
+            _diag_event("seed_run_started", status="begin", payload={"precision": precision, "output": _display_path(output), "diagnostics_phase": diag_phase})
             rc = subprocess.run(seed_cmd, cwd=str(ROOT), env=env).returncode
             if rc != 0:
                 _DIAG_SESSION.update_summary("simulation_1d", {"seed_precision": precision, "returncode": rc, "diagnostics_phase": diag_phase}, status="error")
                 return rc
-            generated.append({"precision": precision, "output": str(output)})
+            generated.append({"precision": precision, "output": _display_path(output)})
         manifest = _load_seed_manifest()
         manifest["precisions"] = {
             item["precision"]: {"output": item["output"], "visible": item["precision"] == "high"}
@@ -282,7 +311,7 @@ def main() -> int:
         _save_seed_manifest(manifest)
         _DIAG_SESSION.update_summary("simulation_1d", {"generated_seeds": generated, "diagnostics_phase": diag_phase}, status="success")
         return 0
-    _diag_event("simulation_wrapper_subprocess_start", status="begin", payload={"cmd": cmd, "cwd": str(ROOT), "diagnostics_phase": diag_phase})
+    _diag_event("simulation_wrapper_subprocess_start", status="begin", payload={"cmd": _sanitized_command_list(cmd), "cwd": ".", "diagnostics_phase": diag_phase})
     rc = subprocess.run(cmd, cwd=str(ROOT), env=env).returncode
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     _diag_event(
@@ -293,7 +322,7 @@ def main() -> int:
     )
     _DIAG_SESSION.update_summary(
         "simulation_1d",
-        {"wrapper_returncode": rc, "precision": args.precision, "command": cmd, "diagnostics_phase": diag_phase, "clean": args.clean},
+        {"wrapper_returncode": rc, "precision": args.precision, "command": _sanitized_command_list(cmd), "diagnostics_phase": diag_phase, "clean": args.clean},
         status="success" if rc == 0 else "error",
     )
     return rc

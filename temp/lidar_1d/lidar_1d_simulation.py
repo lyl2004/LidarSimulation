@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Independent 1D lidar simulation for the PDF/PNG task in temp/.
+Independent 1D lidar simulation for the packaged 1D workflow.
 
-The script follows the calculation flow from temp/计算流程.pdf:
+The core signal model is:
     P(R) = C * O(R) * beta * exp(-2 * alpha * R) / R^2
 
-For the local-figure workflow, the plotted power curves are range-gate
-received-equation quantities. Plot labels are localized in Chinese for the
-temp report.
+For the local figure workflow, the plotted power curves are range-gate
+received-equation quantities. Plot labels are localized in Chinese.
 """
 
 from __future__ import annotations
@@ -158,6 +157,19 @@ DEFAULT_SYSTEM_CONSTANT = (
 )
 LIDAR_PULSE_RANGE_RESOLUTION_M = LIDAR_C_M_S * LIDAR_PULSE_WIDTH_S * 0.5
 TRAPZ = getattr(np, "trapezoid", np.trapz)
+PLANCK_CONSTANT_J_S = 6.62607015e-34
+ELECTRON_CHARGE_C = 1.602176634e-19
+
+DEFAULT_NOISE_MODEL = {
+    "enabled": True,
+    "quantum_efficiency": 0.6,
+    "background_power_W": 1.0e-12,
+    "dark_current_A": 1.0e-9,
+    "read_noise_e": 10.0,
+    "average_pulses": 1000,
+    "generate_noisy_curve": False,
+    "random_seed": 202606,
+}
 
 CN_SCENARIO_TITLES = {
     "radiation_fog": "辐射雾",
@@ -261,6 +273,18 @@ class OpticalSummary:
     beta_perpendicular_molecular: float | None = None
     beta_parallel_total: float | None = None
     beta_perpendicular_total: float | None = None
+
+
+@dataclass(frozen=True)
+class NoiseModel:
+    enabled: bool = True
+    quantum_efficiency: float = 0.6
+    background_power_W: float = 1.0e-12
+    dark_current_A: float = 1.0e-9
+    read_noise_e: float = 10.0
+    average_pulses: int = 1000
+    generate_noisy_curve: bool = False
+    random_seed: int | None = 202606
 
 
 def _optical_summary_from_cache(cached: dict) -> "OpticalSummary":
@@ -608,9 +632,38 @@ def _resolve_julia_depot_dir() -> Path:
     depot = _get_julia_depot_path()
     if depot is not None and depot.exists():
         return depot
-    raise RuntimeError(
-        "Julia depot 未找到；请先准备安装包自带 depot，或确保 scripts/build_installer/dist/julia_depot 可用。"
-    )
+    raise RuntimeError("Julia depot 未找到；请检查项目根目录下的 julia_depot 或 JULIA_DEPOT_PATH。")
+
+
+def _display_path(value: str | Path) -> str:
+    path = Path(value)
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    try:
+        rel = resolved.relative_to(ROOT.resolve())
+        return "." if not str(rel) else str(rel)
+    except Exception:
+        name = resolved.name or str(value)
+        return name
+
+
+def _sanitize_cmd_token(token: object) -> str:
+    text = str(token)
+    if text.startswith("--project="):
+        return f"--project={_display_path(text.split('=', 1)[1])}"
+    if any(sep in text for sep in ("\\", "/")):
+        return _display_path(text)
+    return text
+
+
+def _sanitized_command(tokens: list[object]) -> str:
+    return " ".join(_sanitize_cmd_token(token) for token in tokens)
+
+
+def _sanitized_command_list(tokens: list[object]) -> list[str]:
+    return [_sanitize_cmd_token(token) for token in tokens]
 
 
 def run_tmatrix_batch(
@@ -822,19 +875,19 @@ def run_tmatrix_batch(
         response_arg,
     ]
     debug_meta = {
-        "resolved_julia": julia_exe,
-        "cwd": str(ROOT),
-        "project": str(julia_dir),
-        "wrapper": str(wrapper),
-        "request": str(request_path),
-        "response": str(response_path),
-        "julia_depot": str(julia_depot_dir),
+        "resolved_julia": _sanitize_cmd_token(julia_exe),
+        "cwd": ".",
+        "project": _display_path(julia_dir),
+        "wrapper": _display_path(wrapper),
+        "request": _display_path(request_path),
+        "response": _display_path(response_path),
+        "julia_depot": _display_path(julia_depot_dir),
     }
     (tm_dir / "tmatrix_invocation.json").write_text(json.dumps(debug_meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"[tmatrix] running {len(tasks_to_run)}/{len(tasks)} task(s), solver={args.tmatrix_solver}, n_radii={args.tmatrix_n_radii}")
-    print(f"[tmatrix] julia depot: {julia_depot_dir}")
-    print(f"[tmatrix] command: {' '.join(cmd)}")
+    print(f"[tmatrix] julia depot: {_display_path(julia_depot_dir)}")
+    print(f"[tmatrix] command: {_sanitized_command(cmd)}")
     t0 = time.perf_counter()
     run_env = os.environ.copy()
     run_env["JULIA_DEPOT_PATH"] = str(julia_depot_dir)
@@ -1365,6 +1418,138 @@ def apply_noise_floor(power: np.ndarray) -> np.ndarray:
     return np.asarray(power, dtype=float)
 
 
+def _bool_from_value(value, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
+def resolve_noise_model(overrides: dict | None = None) -> NoiseModel:
+    raw = {}
+    if isinstance(overrides, dict):
+        inst = overrides.get("instrument", {})
+        if isinstance(inst, dict) and isinstance(inst.get("receiver_noise"), dict):
+            raw = inst.get("receiver_noise", {})
+        elif isinstance(overrides.get("noise"), dict):
+            raw = overrides.get("noise", {})
+    defaults = DEFAULT_NOISE_MODEL
+    seed_raw = raw.get("random_seed", defaults["random_seed"]) if isinstance(raw, dict) else defaults["random_seed"]
+    try:
+        random_seed = int(seed_raw) if seed_raw not in (None, "") else None
+    except Exception:
+        random_seed = defaults["random_seed"]
+    try:
+        average_pulses = max(1, int(raw.get("average_pulses", defaults["average_pulses"])))
+    except Exception:
+        average_pulses = int(defaults["average_pulses"])
+    return NoiseModel(
+        enabled=_bool_from_value(raw.get("enabled"), bool(defaults["enabled"])),
+        quantum_efficiency=max(float(raw.get("quantum_efficiency", defaults["quantum_efficiency"])), 1.0e-12),
+        background_power_W=max(float(raw.get("background_power_W", defaults["background_power_W"])), 0.0),
+        dark_current_A=max(float(raw.get("dark_current_A", defaults["dark_current_A"])), 0.0),
+        read_noise_e=max(float(raw.get("read_noise_e", defaults["read_noise_e"])), 0.0),
+        average_pulses=average_pulses,
+        generate_noisy_curve=_bool_from_value(raw.get("generate_noisy_curve"), bool(defaults["generate_noisy_curve"])),
+        random_seed=random_seed,
+    )
+
+
+def noise_model_snapshot(noise: NoiseModel, *, wavelength_nm: float, gate_time_s: float) -> dict[str, object]:
+    return {
+        "enabled": bool(noise.enabled),
+        "model": "direct_detection_photoelectron",
+        "snr_definition": "SNR=N_signal/sigma_noise, SNR_dB=20log10(SNR)",
+        "quantum_efficiency": float(noise.quantum_efficiency),
+        "background_power_W": float(noise.background_power_W),
+        "dark_current_A": float(noise.dark_current_A),
+        "read_noise_e": float(noise.read_noise_e),
+        "average_pulses": int(noise.average_pulses),
+        "gate_time_s": float(gate_time_s),
+        "wavelength_nm": float(wavelength_nm),
+        "generate_noisy_curve": bool(noise.generate_noisy_curve),
+        "random_seed": noise.random_seed,
+    }
+
+
+def compute_noise_metrics(
+    power_signal_W: np.ndarray,
+    *,
+    wavelength_nm: float,
+    gate_time_s: float,
+    noise: NoiseModel,
+    rng: np.random.Generator | None = None,
+) -> dict[str, object]:
+    power_signal = np.asarray(power_signal_W, dtype=float)
+    if not noise.enabled:
+        zeros = np.zeros_like(power_signal, dtype=float)
+        nan_arr = np.full_like(power_signal, np.nan, dtype=float)
+        return {
+            "power_observed_expected_raw": power_signal,
+            "power_observed_raw": power_signal,
+            "power_observed_noisy_raw": power_signal,
+            "noise_std_power_W": zeros,
+            "noise_floor_rms_W": 0.0,
+            "snr_linear": nan_arr,
+            "snr_db": nan_arr,
+            "signal_photoelectrons": nan_arr,
+            "background_photoelectrons": 0.0,
+            "dark_photoelectrons": 0.0,
+        }
+
+    photon_energy = PLANCK_CONSTANT_J_S * LIDAR_C_M_S / (float(wavelength_nm) * 1.0e-9)
+    gate_time = max(float(gate_time_s), 1.0e-30)
+    eta_q = max(float(noise.quantum_efficiency), 1.0e-12)
+    avg = max(int(noise.average_pulses), 1)
+    electron_per_watt = eta_q * gate_time / photon_energy
+
+    signal_e = np.maximum(power_signal, 0.0) * electron_per_watt
+    background_e = float(noise.background_power_W) * electron_per_watt
+    dark_e = float(noise.dark_current_A) * gate_time / ELECTRON_CHARGE_C
+    fixed_var_e = max(background_e, 0.0) + max(dark_e, 0.0) + float(noise.read_noise_e) ** 2
+    total_var_e = np.maximum(signal_e + fixed_var_e, 0.0)
+    sigma_e_avg = np.sqrt(total_var_e / avg)
+    noise_std_power = sigma_e_avg / electron_per_watt
+    noise_floor_rms = math.sqrt(max(fixed_var_e, 0.0) / avg) / electron_per_watt
+    snr_linear = np.divide(
+        signal_e,
+        sigma_e_avg,
+        out=np.zeros_like(signal_e, dtype=float),
+        where=sigma_e_avg > 0.0,
+    )
+    snr_db = np.full_like(snr_linear, np.nan, dtype=float)
+    positive = snr_linear > 0.0
+    snr_db[positive] = 20.0 * np.log10(snr_linear[positive])
+
+    power_expected = power_signal + float(noise.background_power_W)
+    if noise.generate_noisy_curve and rng is not None:
+        noise_sample = rng.normal(0.0, noise_std_power)
+        power_noisy = power_expected + noise_sample
+    else:
+        power_noisy = power_expected
+
+    return {
+        "power_observed_expected_raw": power_expected,
+        "power_observed_raw": power_expected,
+        "power_observed_noisy_raw": power_noisy,
+        "noise_std_power_W": noise_std_power,
+        "noise_floor_rms_W": float(noise_floor_rms),
+        "snr_linear": snr_linear,
+        "snr_db": snr_db,
+        "signal_photoelectrons": signal_e,
+        "background_photoelectrons": float(background_e),
+        "dark_photoelectrons": float(dark_e),
+    }
+
+
 def lidar_power(
     range_m: np.ndarray,
     alpha: float,
@@ -1404,6 +1589,56 @@ def raw_power_summary(range_m: np.ndarray, power_signal: np.ndarray, power_obser
         "peak_observed_range_m": float(range_m[peak_observed_idx]),
         "final_cumulative_signal_raw_m": float(cumulative_curve(range_m, power_signal)[-1]),
         "final_cumulative_observed_raw_m": float(cumulative_curve(range_m, power_observed)[-1]),
+    }
+
+
+def snr_curve_summary(range_m: np.ndarray, snr_linear: np.ndarray, snr_db: np.ndarray) -> dict[str, float | None]:
+    range_m = np.asarray(range_m, dtype=float)
+    snr_linear = np.asarray(snr_linear, dtype=float)
+    snr_db = np.asarray(snr_db, dtype=float)
+    finite = np.isfinite(snr_linear) & np.isfinite(snr_db)
+    if not np.any(finite):
+        return {
+            "peak_snr_linear": None,
+            "peak_snr_db": None,
+            "snr_db_at_100m": None,
+            "snr_db_at_500m": None,
+            "snr_db_at_1000m": None,
+            "snr_db_at_2000m": None,
+            "max_range_snr_ge_3": None,
+            "max_range_snr_ge_10": None,
+            "min_snr_db": None,
+            "median_snr_db": None,
+        }
+    valid_range = range_m[finite]
+    valid_linear = snr_linear[finite]
+    valid_db = snr_db[finite]
+    peak_idx = int(np.nanargmax(valid_linear))
+
+    def _snr_at(distance_m: float) -> float | None:
+        if len(valid_range) == 0:
+            return None
+        if distance_m < valid_range[0] or distance_m > valid_range[-1]:
+            return None
+        return float(np.interp(distance_m, valid_range, valid_db))
+
+    def _max_range_for(threshold: float) -> float | None:
+        mask = finite & (snr_linear >= threshold)
+        if not np.any(mask):
+            return None
+        return float(np.max(range_m[mask]))
+
+    return {
+        "peak_snr_linear": float(valid_linear[peak_idx]),
+        "peak_snr_db": float(valid_db[peak_idx]),
+        "snr_db_at_100m": _snr_at(100.0),
+        "snr_db_at_500m": _snr_at(500.0),
+        "snr_db_at_1000m": _snr_at(1000.0),
+        "snr_db_at_2000m": _snr_at(2000.0),
+        "max_range_snr_ge_3": _max_range_for(3.0),
+        "max_range_snr_ge_10": _max_range_for(10.0),
+        "min_snr_db": float(np.nanmin(valid_db)),
+        "median_snr_db": float(np.nanmedian(valid_db)),
     }
 
 
@@ -1609,6 +1844,7 @@ def build_effective_params_snapshot(
     system_constant: float,
     precision_profile: str,
     instrument_parameters: dict[str, float],
+    noise_model: NoiseModel,
 ) -> dict[str, object]:
     """Persist the effective run inputs in the UI override schema."""
     return {
@@ -1655,6 +1891,16 @@ def build_effective_params_snapshot(
             "pulse_width_s": float(instrument_parameters["pulse_width_s"]),
             "receiver_radius_m": float(instrument_parameters["receiver_radius_m"]),
             "optical_efficiency": float(instrument_parameters["optical_efficiency"]),
+            "receiver_noise": {
+                "enabled": bool(noise_model.enabled),
+                "quantum_efficiency": float(noise_model.quantum_efficiency),
+                "background_power_W": float(noise_model.background_power_W),
+                "dark_current_A": float(noise_model.dark_current_A),
+                "read_noise_e": float(noise_model.read_noise_e),
+                "average_pulses": int(noise_model.average_pulses),
+                "generate_noisy_curve": bool(noise_model.generate_noisy_curve),
+                "random_seed": noise_model.random_seed,
+            },
         },
         "precision": str(precision_profile),
     }
@@ -1911,6 +2157,8 @@ def run(args: argparse.Namespace) -> int:
     overrides = load_param_overrides(ROOT)
     _inst_ov = overrides.get("instrument", {}) if overrides else {}
     _instrument = resolve_instrument_parameters(args.system_constant, _inst_ov)
+    _noise_model = resolve_noise_model(overrides)
+    _noise_rng = np.random.default_rng(_noise_model.random_seed) if _noise_model.generate_noisy_curve else None
     _p0_w = _instrument["laser_peak_power_W"]
     _tau_s = _instrument["pulse_width_s"]
     _r_m = _instrument["receiver_radius_m"]
@@ -1928,7 +2176,7 @@ def run(args: argparse.Namespace) -> int:
             "range_min_m": float(range_m[0]),
             "range_max_m": float(range_m[-1]),
             "range_step_m": args.range_step_m,
-            "command": " ".join(sys.argv),
+            "command": _sanitized_command(list(sys.argv)),
             "calculation_scheme": "local",
             "generated_curve_families": {"local": True},
             "alpha_mol_m_inv": ALPHA_MOL,
@@ -1949,7 +2197,17 @@ def run(args: argparse.Namespace) -> int:
                 "optical_efficiency": _eta,
                 "geometric_overlap_default": 1.0,
             },
-            "noise_floor": 0.0,
+            "noise_floor": float(compute_noise_metrics(
+                np.asarray([0.0], dtype=float),
+                wavelength_nm=WAVELENGTH_NM,
+                gate_time_s=_tau_s,
+                noise=_noise_model,
+            )["noise_floor_rms_W"]),
+            "noise_model": noise_model_snapshot(
+                _noise_model,
+                wavelength_nm=WAVELENGTH_NM,
+                gate_time_s=_tau_s,
+            ),
             "overlap": {
                 "mode": "ideal",
                 "blind_range_m": 0.0,
@@ -1981,6 +2239,7 @@ def run(args: argparse.Namespace) -> int:
             "power_normalization": "Local power figures plot raw observed P(R) in linear/log subplots; CSV files also keep normalized columns for comparison. Cumulative figures remain normalized.",
             "qback_convention": "PDF Eq. (8): particle beta uses integral(Qback*pi*r^2*n(r)dr); molecular beta is converted from standard m^-1 sr^-1 to the same reference by multiplying 4*pi.",
             "raw_power_summary": "Each scenario summary reports peak and cumulative raw P(R) before figure normalization.",
+            "snr_output": "CSV files include noise_std_power_W, noise_floor_rms_W, snr_linear and snr_db computed in the direct-detection photoelectron domain.",
             "stokes_depolarization_enabled": True,
             "stokes_depolarization_model": "1D discrete-angle Stokes [I,Q,U,V] propagation; figures 7-10 use the corrected echo depolarization profile. Single-scattering volume depolarization is retained in summary diagnostics only.",
             "stokes_max_orders": args.stokes_max_orders,
@@ -2014,7 +2273,7 @@ def run(args: argparse.Namespace) -> int:
         payload={
             "output": str(out),
             "clean": args.clean,
-            "command": list(sys.argv),
+            "command": _sanitized_command_list(list(sys.argv)),
             "range_grid_points": int(len(range_m)),
             "range_step_m": args.range_step_m,
             "range_max_m": args.range_max_m,
@@ -2026,7 +2285,7 @@ def run(args: argparse.Namespace) -> int:
             "tmatrix_n_radii": args.tmatrix_n_radii,
             "tmatrix_nr": args.tmatrix_nr,
             "tmatrix_ntheta": args.tmatrix_ntheta,
-            "julia_cmd": args.julia_cmd,
+            "julia_cmd": _sanitize_cmd_token(args.julia_cmd),
             "julia_threads": args.julia_threads,
         },
     )
@@ -2035,7 +2294,10 @@ def run(args: argparse.Namespace) -> int:
     print(f"[info] range grid: {len(range_m)} points, {range_m[0]:.0f}-{range_m[-1]:.0f} m, dR={args.range_step_m:g} m")
     print(f"[info] particle grids: fog={args.fog_grid}, rain={args.rain_grid}")
     print("[info] calculation scheme: local")
-    print(f"[info] lidar system: C={args.system_constant:g}, noise_floor=0, overlap=ideal")
+    print(
+        f"[info] lidar system: C={args.system_constant:g}, "
+        f"noise={'enabled' if _noise_model.enabled else 'disabled'}, overlap=ideal"
+    )
 
     # Optical cache: per-group independent keys so changing only fog/haze/rain
     # parameters does not invalidate the other groups.
@@ -2262,7 +2524,14 @@ def run(args: argparse.Namespace) -> int:
             oc.setdefault("fog", {})[spec.key] = {**{k: getattr(summary, k) for k in OpticalSummary.__dataclass_fields__}, "modes": details}
             print(f"{_ts()} [step] fog {index}/{len(fog_specs)} {spec.key}: done ({time.perf_counter()-_step_t:.2f}s)  alpha={summary.alpha_total:.6e} beta={summary.beta_total:.6e}")
         power_signal = lidar_power(range_m, summary.alpha_total, summary.beta_total, args.system_constant, overlap)
-        power_observed = apply_noise_floor(power_signal)
+        noise_metrics = compute_noise_metrics(
+            power_signal,
+            wavelength_nm=WAVELENGTH_NM,
+            gate_time_s=_tau_s,
+            noise=_noise_model,
+            rng=_noise_rng,
+        )
+        power_observed = np.asarray(noise_metrics["power_observed_raw"], dtype=float)
         label_cn = cn_scenario_title(spec.key, spec.title)
         p_norm = normalized(power_observed)
         save_power_curve(
@@ -2275,13 +2544,47 @@ def run(args: argparse.Namespace) -> int:
         )
         write_curve_csv(
             data / f"{spec.key}_power.csv",
-            ["range_m", "overlap", "power_signal_raw", "power_observed_raw", "power_normalized"],
-            zip(range_m, overlap, power_signal, power_observed, p_norm),
+            [
+                "range_m",
+                "overlap",
+                "power_signal_raw",
+                "power_observed_expected_raw",
+                "power_observed_raw",
+                "power_observed_noisy_raw",
+                "noise_std_power_W",
+                "noise_floor_rms_W",
+                "snr_linear",
+                "snr_db",
+                "power_normalized",
+            ],
+            zip(
+                range_m,
+                overlap,
+                power_signal,
+                np.asarray(noise_metrics["power_observed_expected_raw"], dtype=float),
+                power_observed,
+                np.asarray(noise_metrics["power_observed_noisy_raw"], dtype=float),
+                np.asarray(noise_metrics["noise_std_power_W"], dtype=float),
+                np.full_like(range_m, float(noise_metrics["noise_floor_rms_W"]), dtype=float),
+                np.asarray(noise_metrics["snr_linear"], dtype=float),
+                np.asarray(noise_metrics["snr_db"], dtype=float),
+                p_norm,
+            ),
         )
         entry = asdict(summary)
         entry["spec"] = asdict(spec)
         entry["modes"] = details
         entry["power_raw"] = raw_power_summary(range_m, power_signal, power_observed)
+        entry["noise"] = {
+            "noise_floor_rms_W": float(noise_metrics["noise_floor_rms_W"]),
+            "background_power_W": float(_noise_model.background_power_W),
+            "gate_time_s": float(_tau_s),
+        }
+        entry["snr_summary"] = snr_curve_summary(
+            range_m,
+            np.asarray(noise_metrics["snr_linear"], dtype=float),
+            np.asarray(noise_metrics["snr_db"], dtype=float),
+        )
         entry["precision_warnings"] = grid_precision_warnings(
             summary, args.alpha_precision_tol, args.beta_precision_tol
         )
@@ -2337,7 +2640,14 @@ def run(args: argparse.Namespace) -> int:
             oc.setdefault("haze", {})[spec.key] = {**{k: getattr(summary, k) for k in OpticalSummary.__dataclass_fields__}, "modes": details}
             print(f"{_ts()} [step] haze {offset-2}/{len(haze_specs)} {spec.key}: done ({time.perf_counter()-_step_t:.2f}s)  alpha={summary.alpha_total:.6e} beta={summary.beta_total:.6e}")
         power_signal = lidar_power(range_m, summary.alpha_total, summary.beta_total, args.system_constant, overlap)
-        power_observed = apply_noise_floor(power_signal)
+        noise_metrics = compute_noise_metrics(
+            power_signal,
+            wavelength_nm=WAVELENGTH_NM,
+            gate_time_s=_tau_s,
+            noise=_noise_model,
+            rng=_noise_rng,
+        )
+        power_observed = np.asarray(noise_metrics["power_observed_raw"], dtype=float)
 
         # Mueller library: check independent mueller cache first
         mueller_cache_source = "local" if spec.key in raw_mc else ("default_fallback" if mueller_default_hit and spec.key in mc else "built")
@@ -2395,8 +2705,32 @@ def run(args: argparse.Namespace) -> int:
         )
         write_curve_csv(
             data / f"{spec.key}_power.csv",
-            ["range_m", "overlap", "power_signal_raw", "power_observed_raw", "power_normalized"],
-            zip(range_m, overlap, power_signal, power_observed, p_norm),
+            [
+                "range_m",
+                "overlap",
+                "power_signal_raw",
+                "power_observed_expected_raw",
+                "power_observed_raw",
+                "power_observed_noisy_raw",
+                "noise_std_power_W",
+                "noise_floor_rms_W",
+                "snr_linear",
+                "snr_db",
+                "power_normalized",
+            ],
+            zip(
+                range_m,
+                overlap,
+                power_signal,
+                np.asarray(noise_metrics["power_observed_expected_raw"], dtype=float),
+                power_observed,
+                np.asarray(noise_metrics["power_observed_noisy_raw"], dtype=float),
+                np.asarray(noise_metrics["noise_std_power_W"], dtype=float),
+                np.full_like(range_m, float(noise_metrics["noise_floor_rms_W"]), dtype=float),
+                np.asarray(noise_metrics["snr_linear"], dtype=float),
+                np.asarray(noise_metrics["snr_db"], dtype=float),
+                p_norm,
+            ),
         )
         save_depol_curve(
             figures / f"fig{offset + 4:02d}_{spec.key}_depol.png",
@@ -2419,6 +2753,16 @@ def run(args: argparse.Namespace) -> int:
         }
         entry["modes"] = details
         entry["power_raw"] = raw_power_summary(range_m, power_signal, power_observed)
+        entry["noise"] = {
+            "noise_floor_rms_W": float(noise_metrics["noise_floor_rms_W"]),
+            "background_power_W": float(_noise_model.background_power_W),
+            "gate_time_s": float(_tau_s),
+        }
+        entry["snr_summary"] = snr_curve_summary(
+            range_m,
+            np.asarray(noise_metrics["snr_linear"], dtype=float),
+            np.asarray(noise_metrics["snr_db"], dtype=float),
+        )
         entry["mueller_library"] = {
             "source": mueller_library.source,
             "angle_count": int(len(mueller_library.angles_deg)),
@@ -2481,7 +2825,7 @@ def run(args: argparse.Namespace) -> int:
     )
 
     rain_stage_t0 = time.perf_counter()
-    rain_raw_curves: list[tuple[str, str, np.ndarray, np.ndarray]] = []
+    rain_raw_curves: list[tuple[str, str, np.ndarray, np.ndarray, dict[str, object]]] = []
     rain_csv_headers = ["range_m"]
     for ri, spec in enumerate(rain_specs, start=1):
         scenario_t0 = time.perf_counter()
@@ -2498,14 +2842,41 @@ def run(args: argparse.Namespace) -> int:
             oc.setdefault("rain", {})[spec.key] = {**{k: getattr(summary, k) for k in OpticalSummary.__dataclass_fields__}, "diameter_grid": rain_grid_meta}
             print(f"{_ts()} [step] rain {ri}/{len(rain_specs)} {spec.key}: done ({time.perf_counter()-_step_t:.2f}s)  alpha={summary.alpha_total:.6e} beta={summary.beta_total:.6e}")
         power_signal = lidar_power(range_m, summary.alpha_total, summary.beta_total, args.system_constant, overlap)
-        power_observed = apply_noise_floor(power_signal)
-        rain_raw_curves.append((spec.key, spec.title, power_signal, power_observed))
-        rain_csv_headers += [f"{spec.key}_power_signal_raw", f"{spec.key}_power_observed_raw", f"{spec.key}_power_normalized_in_fig11"]
+        noise_metrics = compute_noise_metrics(
+            power_signal,
+            wavelength_nm=WAVELENGTH_NM,
+            gate_time_s=_tau_s,
+            noise=_noise_model,
+            rng=_noise_rng,
+        )
+        power_observed = np.asarray(noise_metrics["power_observed_raw"], dtype=float)
+        rain_raw_curves.append((spec.key, spec.title, power_signal, power_observed, noise_metrics))
+        rain_csv_headers += [
+            f"{spec.key}_power_signal_raw",
+            f"{spec.key}_power_observed_expected_raw",
+            f"{spec.key}_power_observed_raw",
+            f"{spec.key}_power_observed_noisy_raw",
+            f"{spec.key}_noise_std_power_W",
+            f"{spec.key}_noise_floor_rms_W",
+            f"{spec.key}_snr_linear",
+            f"{spec.key}_snr_db",
+            f"{spec.key}_power_normalized_in_fig11",
+        ]
         entry = asdict(summary)
         entry["spec"] = asdict(spec)
         entry["diameter_grid"] = rain_grid_meta
         entry["marshall_palmer_lambda_mm_inv"] = 4.1 * spec.rain_rate_mm_h ** (-0.21) if spec.rain_rate_mm_h > 0.0 else None
         entry["power_raw"] = raw_power_summary(range_m, power_signal, power_observed)
+        entry["noise"] = {
+            "noise_floor_rms_W": float(noise_metrics["noise_floor_rms_W"]),
+            "background_power_W": float(_noise_model.background_power_W),
+            "gate_time_s": float(_tau_s),
+        }
+        entry["snr_summary"] = snr_curve_summary(
+            range_m,
+            np.asarray(noise_metrics["snr_linear"], dtype=float),
+            np.asarray(noise_metrics["snr_db"], dtype=float),
+        )
         entry["precision_warnings"] = grid_precision_warnings(
             summary, args.alpha_precision_tol, args.beta_precision_tol
         )
@@ -2532,15 +2903,25 @@ def run(args: argparse.Namespace) -> int:
         )
         print(f"{_ts()} [step] rain {ri}/{len(rain_specs)} {spec.key}: done")
     if rain_raw_curves:
-        rain_common_max = max(float(np.max(power_observed)) for _key, _title, _power_signal, power_observed in rain_raw_curves)
+        rain_common_max = max(float(np.max(power_observed)) for _key, _title, _power_signal, power_observed, _noise_metrics in rain_raw_curves)
         rain_common_max = max(rain_common_max, 1.0e-300)
         rain_curves = [
             (cn_scenario_title(key, title), power_observed)
-            for key, title, _power_signal, power_observed in rain_raw_curves
+            for key, title, _power_signal, power_observed, _noise_metrics in rain_raw_curves
         ]
         rain_csv_cols: list[np.ndarray] = [range_m]
-        for _key, _title, power_signal, power_observed in rain_raw_curves:
-            rain_csv_cols += [power_signal, power_observed, power_observed / rain_common_max]
+        for _key, _title, power_signal, power_observed, noise_metrics in rain_raw_curves:
+            rain_csv_cols += [
+                power_signal,
+                np.asarray(noise_metrics["power_observed_expected_raw"], dtype=float),
+                power_observed,
+                np.asarray(noise_metrics["power_observed_noisy_raw"], dtype=float),
+                np.asarray(noise_metrics["noise_std_power_W"], dtype=float),
+                np.full_like(range_m, float(noise_metrics["noise_floor_rms_W"]), dtype=float),
+                np.asarray(noise_metrics["snr_linear"], dtype=float),
+                np.asarray(noise_metrics["snr_db"], dtype=float),
+                power_observed / rain_common_max,
+            ]
         save_power_curve(
             figures / "fig11_rain_power.png",
             range_m,
@@ -2565,46 +2946,70 @@ def run(args: argparse.Namespace) -> int:
     # Persist optical cache — only groups that were (re)computed are written;
     # groups that were cache hits already exist on disk and are preserved.
     cache_persist_t0 = time.perf_counter()
-    _save_optical_cache(optical_cache_dir, fog_key, haze_key, rain_key, oc)
-    print(f"{_ts()} [step] optical cache saved")
+    cache_persist_warnings: list[str] = []
+    try:
+        _save_optical_cache(optical_cache_dir, fog_key, haze_key, rain_key, oc)
+        print(f"{_ts()} [step] optical cache saved")
+    except Exception as exc:
+        msg = f"optical cache save skipped: {exc}"
+        cache_persist_warnings.append(msg)
+        print(f"{_ts()} [warn] {msg}")
     mueller_cache_saved = False
     if mc:
-        _save_mueller_cache(optical_cache_dir, mueller_key, mc)
-        mueller_cache_saved = True
-        print(f"{_ts()} [step] Mueller cache saved")
+        try:
+            _save_mueller_cache(optical_cache_dir, mueller_key, mc)
+            mueller_cache_saved = True
+            print(f"{_ts()} [step] Mueller cache saved")
+        except Exception as exc:
+            msg = f"Mueller cache save skipped: {exc}"
+            cache_persist_warnings.append(msg)
+            print(f"{_ts()} [warn] {msg}")
     for group_name, artifact, semantic_key in (
         ("fog_scene", oc.get("fog"), fog_key),
         ("haze_scene", oc.get("haze"), haze_key),
         ("rain_scene", oc.get("rain"), rain_key),
     ):
         if artifact is not None:
+            try:
+                _save_indexed_layer_artifact(
+                    group_name,
+                    precision,
+                    semantic_key,
+                    artifact,
+                    source=artifact_source,
+                    visibility="hidden",
+                    input_hashes={"precision_profile": precision},
+                )
+            except Exception as exc:
+                msg = f"{group_name} indexed cache save skipped: {exc}"
+                cache_persist_warnings.append(msg)
+                print(f"{_ts()} [warn] {msg}")
+    if mc:
+        try:
             _save_indexed_layer_artifact(
-                group_name,
+                "haze_mueller",
                 precision,
-                semantic_key,
-                artifact,
+                mueller_key,
+                mc,
                 source=artifact_source,
                 visibility="hidden",
                 input_hashes={"precision_profile": precision},
             )
-    if mc:
-        _save_indexed_layer_artifact(
-            "haze_mueller",
-            precision,
-            mueller_key,
-            mc,
-            source=artifact_source,
-            visibility="hidden",
-            input_hashes={"precision_profile": precision},
-        )
+        except Exception as exc:
+            msg = f"haze_mueller indexed cache save skipped: {exc}"
+            cache_persist_warnings.append(msg)
+            print(f"{_ts()} [warn] {msg}")
     _diag_event(
         "cache_persist",
         elapsed_ms=(time.perf_counter() - cache_persist_t0) * 1000.0,
         payload={
             "optical_cache_dir": str(optical_cache_dir),
             "mueller_cache_saved": mueller_cache_saved,
+            "warnings": cache_persist_warnings,
         },
     )
+    if cache_persist_warnings:
+        cache_report["persist_warnings"] = cache_persist_warnings
 
     summary_write_t0 = time.perf_counter()
     # 注入 cache_identity:5 子 key + 派生 identity。
@@ -2616,17 +3021,19 @@ def run(args: argparse.Namespace) -> int:
         "optical_efficiency": _eta,
     }
     _instrument_hash = _cache_keys.instrument_hash(_instr_for_hash)
+    _noise_hash = _cache_keys.noise_hash(asdict(_noise_model))
     summaries["cache_identity"] = {
         "fog_key": fog_key,
         "haze_key": haze_key,
         "haze_mueller_key": mueller_key,
         "rain_key": rain_key,
         "instrument_hash": _instrument_hash,
+        "noise_hash": _noise_hash,
         "identity": _cache_keys.compose_run_identity(
-            fog_key, haze_key, mueller_key, rain_key, _instrument_hash
+            fog_key, haze_key, mueller_key, rain_key, _instrument_hash, _noise_hash
         ),
         "precision_profile": precision,
-        "schema_version": 1,
+        "schema_version": 2 if _noise_hash else 1,
     }
     params_snapshot = build_effective_params_snapshot(
         fog_specs,
@@ -2639,6 +3046,7 @@ def run(args: argparse.Namespace) -> int:
         system_constant=args.system_constant,
         precision_profile=precision,
         instrument_parameters=_instrument,
+        noise_model=_noise_model,
     )
     with (out / "summary.json").open("w", encoding="utf-8") as fh:
         json.dump(summaries, fh, ensure_ascii=False, indent=2)

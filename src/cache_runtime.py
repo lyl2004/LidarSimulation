@@ -18,6 +18,7 @@ ROOT = _get_root()
 DEFAULT_RESULT_ID = "default"
 MAX_HISTORY = 10
 CACHE_MAX_VERSIONS = 5
+MAX_HISTORY_DISPLAY_NAME_CHARS = 40
 
 
 @dataclass(frozen=True)
@@ -114,8 +115,21 @@ def _read_json(path: Path, default):
 def _write_json_atomic(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        tmp.replace(path)
+    except PermissionError:
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+            tmp.replace(path)
+        except PermissionError:
+            path.write_text(text, encoding="utf-8")
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -140,6 +154,52 @@ def load_manifest() -> dict:
 
 def save_manifest(manifest: dict) -> None:
     _write_json_atomic(LAYOUT.manifest_path, _normalize_manifest(manifest))
+
+
+def sanitize_history_display_name(name: object) -> str:
+    cleaned = " ".join(str(name or "").split())
+    return cleaned[:MAX_HISTORY_DISPLAY_NAME_CHARS]
+
+
+def history_entry_custom_name(entry: dict | None) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    if "display_name" in entry:
+        return sanitize_history_display_name(entry.get("display_name"))
+    label = sanitize_history_display_name(entry.get("label"))
+    if not label:
+        return ""
+    if label in {str(entry.get("timestamp") or ""), str(entry.get("id") or "")}:
+        return ""
+    return label
+
+
+def history_record_label(run_id: str, entry: dict | None = None) -> str:
+    if run_id == DEFAULT_RESULT_ID:
+        return "默认结果"
+    name = history_entry_custom_name(entry)
+    return name or run_id
+
+
+def rename_history_run(run_id: str, display_name: object) -> dict:
+    if run_id == DEFAULT_RESULT_ID:
+        raise ValueError("默认结果不可重命名")
+    manifest = load_manifest()
+    for entry in manifest.get("runs", []):
+        if entry.get("id") != run_id:
+            continue
+        if not run_exists(run_id):
+            raise FileNotFoundError(f"运行结果不存在：{run_id}")
+        cleaned = sanitize_history_display_name(display_name)
+        if cleaned:
+            entry["display_name"] = cleaned
+            entry["name_updated_at"] = time.time()
+        else:
+            entry["display_name"] = ""
+            entry["name_updated_at"] = time.time()
+        save_manifest(manifest)
+        return entry
+    raise FileNotFoundError(f"历史记录不存在：{run_id}")
 
 
 def run_exists(run_id: str) -> bool:
@@ -432,7 +492,7 @@ def build_run_index() -> dict:
         if isinstance(run_id, str):
             _add_record(
                 run_id,
-                str(entry.get("label") or run_id),
+                history_record_label(run_id, entry),
                 entry.get("precision"),
                 entry.get("cache_identity") or {},
             )

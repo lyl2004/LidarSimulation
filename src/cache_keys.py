@@ -45,6 +45,17 @@ DEFAULT_SYSTEM_CONSTANT = (
     * LIDAR_OPTICAL_EFFICIENCY
 )
 
+DEFAULT_NOISE_MODEL = {
+    "enabled": True,
+    "quantum_efficiency": 0.6,
+    "background_power_W": 1.0e-12,
+    "dark_current_A": 1.0e-9,
+    "read_noise_e": 10.0,
+    "average_pulses": 1000,
+    "generate_noisy_curve": False,
+    "random_seed": 202606,
+}
+
 
 # ---------------------------------------------------------------------------
 # 场景 dataclass — 字段顺序、默认值必须与 lidar_1d_simulation.py 一致
@@ -358,6 +369,61 @@ def instrument_hash(instrument: dict) -> str:
     return _sha256_json(payload)
 
 
+def _bool_from_value(value, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
+def normalize_noise_model(noise: dict | None) -> dict:
+    raw = noise or {}
+    defaults = DEFAULT_NOISE_MODEL
+    seed = raw.get("random_seed", defaults["random_seed"])
+    try:
+        seed = int(seed) if seed not in (None, "") else None
+    except Exception:
+        seed = defaults["random_seed"]
+    try:
+        avg = max(1, int(raw.get("average_pulses", defaults["average_pulses"])))
+    except Exception:
+        avg = int(defaults["average_pulses"])
+    return {
+        "enabled": _bool_from_value(raw.get("enabled"), bool(defaults["enabled"])),
+        "quantum_efficiency": max(float(raw.get("quantum_efficiency", defaults["quantum_efficiency"])), 1.0e-12),
+        "background_power_W": max(float(raw.get("background_power_W", defaults["background_power_W"])), 0.0),
+        "dark_current_A": max(float(raw.get("dark_current_A", defaults["dark_current_A"])), 0.0),
+        "read_noise_e": max(float(raw.get("read_noise_e", defaults["read_noise_e"])), 0.0),
+        "average_pulses": avg,
+        "generate_noisy_curve": _bool_from_value(raw.get("generate_noisy_curve"), bool(defaults["generate_noisy_curve"])),
+        "random_seed": seed,
+    }
+
+
+def noise_hash(noise: dict | None) -> str | None:
+    normalized = normalize_noise_model(noise)
+    if not normalized["enabled"]:
+        return None
+    return _sha256_json(normalized)
+
+
+def noise_hash_from_overrides(overrides: dict | None) -> str | None:
+    if not isinstance(overrides, dict):
+        return noise_hash(None)
+    instrument = overrides.get("instrument", {})
+    if isinstance(instrument, dict) and isinstance(instrument.get("receiver_noise"), dict):
+        return noise_hash(instrument.get("receiver_noise"))
+    return noise_hash(overrides.get("noise", {}))
+
+
 # ---------------------------------------------------------------------------
 # 派生 run identity
 # ---------------------------------------------------------------------------
@@ -367,9 +433,13 @@ def compose_run_identity(
     haze_mueller_key: str,
     rain_key: str,
     instrument_hash_value: str,
+    noise_hash_value: str | None = None,
 ) -> str:
-    """5 元组拼接后再 sha256,作为 (参数, 精度, 仪器) 的全局 identity。"""
-    joined = "|".join([fog_key, haze_key, haze_mueller_key, rain_key, instrument_hash_value])
+    """Run identity. When noise is disabled, keep the legacy 5-tuple identity."""
+    parts = [fog_key, haze_key, haze_mueller_key, rain_key, instrument_hash_value]
+    if noise_hash_value:
+        parts.append(noise_hash_value)
+    joined = "|".join(parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
