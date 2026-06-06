@@ -151,23 +151,59 @@ try {
     New-Item -ItemType Directory -Force -Path $cacheStoreIndex | Out-Null
     Write-Step "Cache store ready: $cacheStoreRoot"
 
-    # Initialize default result set as active state
+    # Preserve shipped run_history if present. Older builds always reset the
+    # manifest to default here, which discards demo/test history in packaged
+    # snapshots.
     $defaultResult = Join-Path $InstallDir "temp\lidar_1d\default_result"
-    if (Test-Path $defaultResult) {
-        Write-Step "Initializing default result set as active state"
-        $historyDir = Join-Path $InstallDir "temp\lidar_1d\run_history"
-        New-Item -ItemType Directory -Force -Path $historyDir | Out-Null
+    $historyDir = Join-Path $InstallDir "temp\lidar_1d\run_history"
+    New-Item -ItemType Directory -Force -Path $historyDir | Out-Null
+    $manifestPath = Join-Path $historyDir "manifest.json"
+    $runtimeStateDir = Join-Path $InstallDir "temp\lidar_1d\runtime_state"
+    New-Item -ItemType Directory -Force -Path $runtimeStateDir | Out-Null
+    $activeViewPath = Join-Path $runtimeStateDir "active_view.json"
 
-        $manifestPath = Join-Path $historyDir "manifest.json"
+    if (Test-Path $manifestPath) {
+        try {
+            $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+            $runCount = if ($manifest.runs) { @($manifest.runs).Count } else { 0 }
+            Write-Step "Preserving shipped run history manifest ($runCount runs)."
+            Write-DiagEvent "run_history_preserved" "ok" 0 @{ manifest_path = $manifestPath; run_count = $runCount; active_id = $manifest.active_id }
+
+            if (-not (Test-Path $activeViewPath) -and -not [string]::IsNullOrWhiteSpace($manifest.active_id)) {
+                @{
+                    run_id = [string]$manifest.active_id
+                    updated_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                } | ConvertTo-Json -Depth 10 | Out-File -FilePath $activeViewPath -Encoding utf8
+                Write-Step "Active view initialized from existing manifest."
+            }
+        } catch {
+            $brokenPath = "$manifestPath.broken"
+            Move-Item -Path $manifestPath -Destination $brokenPath -Force
+            Write-Step "Existing manifest was invalid; moved to $brokenPath"
+            if (Test-Path $defaultResult) {
+                $manifest = @{
+                    runs = @()
+                    active_id = "default"
+                }
+                $manifest | ConvertTo-Json -Depth 10 | Out-File -FilePath $manifestPath -Encoding utf8
+                Write-DiagEvent "run_history_manifest_repaired" "ok" 0 @{ manifest_path = $manifestPath; broken_path = $brokenPath }
+            }
+        }
+    } elseif (Test-Path $defaultResult) {
+        Write-Step "No shipped history manifest found; initializing default result as active state"
         $manifest = @{
             runs = @()
             active_id = "default"
         }
         $manifest | ConvertTo-Json -Depth 10 | Out-File -FilePath $manifestPath -Encoding utf8
+        @{
+            run_id = "default"
+            updated_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        } | ConvertTo-Json -Depth 10 | Out-File -FilePath $activeViewPath -Encoding utf8
         Write-Step "Default result set is now active"
         Write-DiagEvent "default_result_initialized" "ok" 0 @{ manifest_path = $manifestPath }
     } else {
-        Write-Step "No default result set found, skipping initialization"
+        Write-Step "No default result set or history manifest found, skipping initialization"
     }
 
     Write-DiagEvent "packs_cleanup_started" "begin" 0 @{ packs_dir = $packsDir }

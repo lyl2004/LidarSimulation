@@ -55,6 +55,8 @@ if (-not (Test-File (Join-Path $distDir "LidarSim.exe") "启动器")) { $failure
 if (-not (Test-File (Join-Path $distDir "gui_packed.tar") "GUI 环境包")) { $failures++ }
 if (-not (Test-File (Join-Path $distDir "mie_packed.tar") "MIE 环境包")) { $failures++ }
 if (-not (Test-Dir (Join-Path $distDir "julia") "Julia 运行时")) { $failures++ }
+if (-not (Test-Dir (Join-Path $distDir "run_history") "历史记录快照")) { $failures++ }
+if (-not (Test-File (Join-Path $distDir "run_history\manifest.json") "历史记录 manifest")) { $failures++ }
 
 # 检查 Julia 关键文件
 $juliaExe = Join-Path $distDir "julia\bin\julia.exe"
@@ -109,6 +111,8 @@ if ($TestInstall) {
         if (-not (Test-File (Join-Path $testInstallDir ".pixi\envs\mie\python.exe") "MIE Python")) { $testFailures++ }
         if (-not (Test-Dir (Join-Path $testInstallDir "julia") "Julia 运行时")) { $testFailures++ }
         if (-not (Test-File (Join-Path $testInstallDir "app\demo_ui.py") "主程序")) { $testFailures++ }
+        if (-not (Test-File (Join-Path $testInstallDir "temp\lidar_1d\run_history\manifest.json") "安装后历史记录 manifest")) { $testFailures++ }
+        if (-not (Test-File (Join-Path $testInstallDir "temp\lidar_1d\runtime_state\active_view.json") "安装后 active view")) { $testFailures++ }
 
         # 检查 postinstall.log
         $postinstallLog = Join-Path $testInstallDir "postinstall.log"

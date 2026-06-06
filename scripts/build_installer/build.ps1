@@ -305,6 +305,31 @@ if (Test-Path (Join-Path $seedExportRoot "manifest.json")) {
 }
 
 # --------------------------------------------------------------------------
+# 3.7. Copy local history/runtime state (local reproducibility assets)
+# --------------------------------------------------------------------------
+Write-Step "复制本地历史记录与运行态（如果存在）"
+$historySrc = Join-Path $repoRoot "temp\lidar_1d\run_history"
+$historyDist = Join-Path $distDir "run_history"
+$runtimeStateSrc = Join-Path $repoRoot "temp\lidar_1d\runtime_state"
+$runtimeStateDist = Join-Path $distDir "runtime_state"
+
+if (Test-Path $historySrc) {
+    Write-Host "  发现历史记录，复制到 dist/"
+    Copy-Tree $historySrc $historyDist
+    Write-Host "  历史记录已复制"
+} else {
+    Write-Host "  未找到历史记录: $historySrc"
+}
+
+if (Test-Path $runtimeStateSrc) {
+    Write-Host "  发现运行态 active view，复制到 dist/"
+    Copy-Tree $runtimeStateSrc $runtimeStateDist
+    Write-Host "  运行态已复制"
+} else {
+    Write-Host "  未找到运行态目录: $runtimeStateSrc"
+}
+
+# --------------------------------------------------------------------------
 # 4. Compile Go launcher
 # --------------------------------------------------------------------------
 Write-Step "编译启动器 LidarSim.exe"

@@ -62,6 +62,10 @@ Source: "dist\cache_store\*"; DestDir: "{app}\temp\lidar_1d\cache_store"; Flags:
 ; ── Default result set (shipped snapshot for first display + cache seed) ────
 Source: "dist\default_result\*"; DestDir: "{app}\temp\lidar_1d\default_result"; Flags: recursesubdirs ignoreversion skipifsourcedoesntexist
 
+; ── Local history snapshot (for reproducible demo/test states) ──────────────
+Source: "dist\run_history\*"; DestDir: "{app}\temp\lidar_1d\run_history"; Flags: recursesubdirs ignoreversion skipifsourcedoesntexist
+Source: "dist\runtime_state\*"; DestDir: "{app}\temp\lidar_1d\runtime_state"; Flags: recursesubdirs ignoreversion skipifsourcedoesntexist
+
 ; ── Post-install helper (deleted automatically after it runs) ───────────────
 Source: "postinstall.ps1"; DestDir: "{app}"; Flags: ignoreversion deleteafterinstall
 
@@ -78,4 +82,3 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
   Parameters: "-ExecutionPolicy Bypass -File ""{app}\postinstall.ps1"" ""{app}"""; \
   StatusMsg: "Setting up Python environments (3-5 min)..."; \
   Flags: waituntilterminated
-
