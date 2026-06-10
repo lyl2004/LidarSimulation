@@ -115,19 +115,19 @@ if DOCS.exists():
 # One export file per curve; exactly two columns (x, y) in each output.
 # ---------------------------------------------------------------------------
 _EXPORT_CURVES: dict[str, tuple[str, str, str]] = {
-    "fig1_RadiationFog.csv":             ("radiation_fog_power.csv",                   "range_m", "power_observed_raw"),
-    "fig2_AdvectionFog.csv":             ("advection_fog_power.csv",                   "range_m", "power_observed_raw"),
-    "fig3_UrbanIndustrialHaze.csv":      ("urban_industrial_haze_power.csv",           "range_m", "power_observed_raw"),
-    "fig4_RuralContinentalHaze.csv":     ("rural_continental_haze_power.csv",          "range_m", "power_observed_raw"),
-    "fig5_DustDesertHaze.csv":           ("dust_desert_haze_power.csv",                "range_m", "power_observed_raw"),
-    "fig6_MaritimeHaze.csv":             ("maritime_haze_power.csv",                   "range_m", "power_observed_raw"),
+    "fig1_RadiationFog.csv":             ("radiation_fog_power.csv",                   "range_m", "power_signal_raw"),
+    "fig2_AdvectionFog.csv":             ("advection_fog_power.csv",                   "range_m", "power_signal_raw"),
+    "fig3_UrbanIndustrialHaze.csv":      ("urban_industrial_haze_power.csv",           "range_m", "power_signal_raw"),
+    "fig4_RuralContinentalHaze.csv":     ("rural_continental_haze_power.csv",          "range_m", "power_signal_raw"),
+    "fig5_DustDesertHaze.csv":           ("dust_desert_haze_power.csv",                "range_m", "power_signal_raw"),
+    "fig6_MaritimeHaze.csv":             ("maritime_haze_power.csv",                   "range_m", "power_signal_raw"),
     "fig7_UrbanIndustrialHazeDepol.csv": ("urban_industrial_haze_depolarization.csv",  "range_m", "echo_depolarization_ratio"),
     "fig8_RuralContinentalHazeDepol.csv":("rural_continental_haze_depolarization.csv", "range_m", "echo_depolarization_ratio"),
     "fig9_DustDesertHazeDepol.csv":      ("dust_desert_haze_depolarization.csv",       "range_m", "echo_depolarization_ratio"),
     "fig10_MaritimeHazeDepol.csv":       ("maritime_haze_depolarization.csv",          "range_m", "echo_depolarization_ratio"),
-    "fig11a_LightRain.csv":              ("rain_power.csv",                            "range_m", "light_rain_power_observed_raw"),
-    "fig11b_ModerateRain.csv":           ("rain_power.csv",                            "range_m", "moderate_rain_power_observed_raw"),
-    "fig11c_HeavyRain.csv":              ("rain_power.csv",                            "range_m", "heavy_rain_power_observed_raw"),
+    "fig11a_LightRain.csv":              ("rain_power.csv",                            "range_m", "light_rain_power_signal_raw"),
+    "fig11b_ModerateRain.csv":           ("rain_power.csv",                            "range_m", "moderate_rain_power_signal_raw"),
+    "fig11c_HeavyRain.csv":              ("rain_power.csv",                            "range_m", "heavy_rain_power_signal_raw"),
     "fig1_RadiationFog_SNR.csv":             ("radiation_fog_power.csv",                   "range_m", "snr_db"),
     "fig2_AdvectionFog_SNR.csv":             ("advection_fog_power.csv",                   "range_m", "snr_db"),
     "fig3_UrbanIndustrialHaze_SNR.csv":      ("urban_industrial_haze_power.csv",           "range_m", "snr_db"),
@@ -152,11 +152,16 @@ def _build_csv_bytes(export_name: str, data_dir: Path) -> bytes | None:
     rows: list[dict] = []
     with open(src, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
+    actual_y_col = y_col
+    if rows and actual_y_col not in rows[0] and actual_y_col.endswith("power_signal_raw"):
+        fallback_y_col = actual_y_col.replace("power_signal_raw", "power_observed_raw")
+        if fallback_y_col in rows[0]:
+            actual_y_col = fallback_y_col
     buf = io.StringIO()
     writer = csv.writer(buf)
     for row in rows:
         try:
-            writer.writerow([row[x_col], row[y_col]])
+            writer.writerow([row[x_col], row[actual_y_col]])
         except KeyError:
             continue
     return buf.getvalue().encode("utf-8")
@@ -431,6 +436,10 @@ def _constant_trace(x: list, y: float, name: str, color: str, dash: str = "dash"
     }
 
 
+def _power_curve(d: dict[str, list[float]], signal_col: str, observed_col: str) -> list[float]:
+    return d.get(signal_col) or d.get(observed_col, [])
+
+
 def fig_fog_power(log: bool) -> dict:
     traces = []
     noise_floor_added = False
@@ -440,7 +449,12 @@ def fig_fog_power(log: bool) -> dict:
     ]:
         d = load_csv(fname)
         if d:
-            traces.append(_trace(d["range_m"], d["power_observed_raw"], label, PAL[key]))
+            traces.append(_trace(
+                d["range_m"],
+                _power_curve(d, "power_signal_raw", "power_observed_raw"),
+                label,
+                PAL[key],
+            ))
             if not noise_floor_added and d.get("noise_floor_rms_W"):
                 traces.append(_constant_trace(d["range_m"], d["noise_floor_rms_W"][0], "噪声底 RMS", "#666666"))
                 noise_floor_added = True
@@ -459,7 +473,12 @@ def fig_haze_power(log: bool) -> dict:
     ]:
         d = load_csv(fname)
         if d:
-            traces.append(_trace(d["range_m"], d["power_observed_raw"], label, PAL[key]))
+            traces.append(_trace(
+                d["range_m"],
+                _power_curve(d, "power_signal_raw", "power_observed_raw"),
+                label,
+                PAL[key],
+            ))
             if not noise_floor_added and d.get("noise_floor_rms_W"):
                 traces.append(_constant_trace(d["range_m"], d["noise_floor_rms_W"][0], "噪声底 RMS", "#666666"))
                 noise_floor_added = True
@@ -488,9 +507,24 @@ def fig_rain_power(log: bool) -> dict:
     traces = []
     if d:
         traces = [
-            _trace(d["range_m"], d["light_rain_power_observed_raw"],    "小雨", PAL["light_rain"]),
-            _trace(d["range_m"], d["moderate_rain_power_observed_raw"], "中雨", PAL["moderate_rain"]),
-            _trace(d["range_m"], d["heavy_rain_power_observed_raw"],    "大雨", PAL["heavy_rain"]),
+            _trace(
+                d["range_m"],
+                _power_curve(d, "light_rain_power_signal_raw", "light_rain_power_observed_raw"),
+                "小雨",
+                PAL["light_rain"],
+            ),
+            _trace(
+                d["range_m"],
+                _power_curve(d, "moderate_rain_power_signal_raw", "moderate_rain_power_observed_raw"),
+                "中雨",
+                PAL["moderate_rain"],
+            ),
+            _trace(
+                d["range_m"],
+                _power_curve(d, "heavy_rain_power_signal_raw", "heavy_rain_power_observed_raw"),
+                "大雨",
+                PAL["heavy_rain"],
+            ),
         ]
         if "light_rain_noise_floor_rms_W" in d:
             traces.append(_constant_trace(d["range_m"], d["light_rain_noise_floor_rms_W"][0], "噪声底 RMS", "#666666"))
@@ -559,14 +593,37 @@ def fig_all_power(log: bool) -> dict:
     ]:
         d = load_csv(fname)
         if d:
-            traces.append(_trace(d["range_m"], d["power_observed_raw"],
-                                 label, PAL[key], dash))
+            traces.append(_trace(
+                d["range_m"],
+                _power_curve(d, "power_signal_raw", "power_observed_raw"),
+                label,
+                PAL[key],
+                dash,
+            ))
     d = load_csv("rain_power.csv")
     if d:
         traces += [
-            _trace(d["range_m"], d["light_rain_power_observed_raw"],    "小雨", PAL["light_rain"],    "solid"),
-            _trace(d["range_m"], d["moderate_rain_power_observed_raw"], "中雨", PAL["moderate_rain"], "dash"),
-            _trace(d["range_m"], d["heavy_rain_power_observed_raw"],    "大雨", PAL["heavy_rain"],    "dashdot"),
+            _trace(
+                d["range_m"],
+                _power_curve(d, "light_rain_power_signal_raw", "light_rain_power_observed_raw"),
+                "小雨",
+                PAL["light_rain"],
+                "solid",
+            ),
+            _trace(
+                d["range_m"],
+                _power_curve(d, "moderate_rain_power_signal_raw", "moderate_rain_power_observed_raw"),
+                "中雨",
+                PAL["moderate_rain"],
+                "dash",
+            ),
+            _trace(
+                d["range_m"],
+                _power_curve(d, "heavy_rain_power_signal_raw", "heavy_rain_power_observed_raw"),
+                "大雨",
+                PAL["heavy_rain"],
+                "dashdot",
+            ),
         ]
     base = _layout("全场景 — 回波功率对比", "P(R)  (W)", log)
     base["margin"] = {"l": 65, "r": 20, "t": 80, "b": 55}

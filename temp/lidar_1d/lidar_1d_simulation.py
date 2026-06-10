@@ -2533,11 +2533,11 @@ def run(args: argparse.Namespace) -> int:
         )
         power_observed = np.asarray(noise_metrics["power_observed_raw"], dtype=float)
         label_cn = cn_scenario_title(spec.key, spec.title)
-        p_norm = normalized(power_observed)
+        p_norm = normalized(power_signal)
         save_power_curve(
             figures / f"fig{index:02d}_{spec.key}_power.png",
             range_m,
-            [(label_cn, power_observed)],
+            [(label_cn, power_signal)],
             f"{label_cn}距离门回波功率",
             ylabel="回波功率 P(R) (W)",
             dual_scale=True,
@@ -2694,11 +2694,11 @@ def run(args: argparse.Namespace) -> int:
             args,
         )
         label_cn = cn_scenario_title(spec.key, spec.title)
-        p_norm = normalized(power_observed)
+        p_norm = normalized(power_signal)
         save_power_curve(
             figures / f"fig{offset:02d}_{spec.key}_power.png",
             range_m,
-            [(label_cn, power_observed)],
+            [(label_cn, power_signal)],
             f"{label_cn}距离门回波功率",
             ylabel="回波功率 P(R) (W)",
             dual_scale=True,
@@ -2903,11 +2903,14 @@ def run(args: argparse.Namespace) -> int:
         )
         print(f"{_ts()} [step] rain {ri}/{len(rain_specs)} {spec.key}: done")
     if rain_raw_curves:
-        rain_common_max = max(float(np.max(power_observed)) for _key, _title, _power_signal, power_observed, _noise_metrics in rain_raw_curves)
+        rain_common_max = max(
+            float(np.max(power_signal))
+            for _key, _title, power_signal, _power_observed, _noise_metrics in rain_raw_curves
+        )
         rain_common_max = max(rain_common_max, 1.0e-300)
         rain_curves = [
-            (cn_scenario_title(key, title), power_observed)
-            for key, title, _power_signal, power_observed, _noise_metrics in rain_raw_curves
+            (cn_scenario_title(key, title), power_signal)
+            for key, title, power_signal, _power_observed, _noise_metrics in rain_raw_curves
         ]
         rain_csv_cols: list[np.ndarray] = [range_m]
         for _key, _title, power_signal, power_observed, noise_metrics in rain_raw_curves:
@@ -2920,7 +2923,7 @@ def run(args: argparse.Namespace) -> int:
                 np.full_like(range_m, float(noise_metrics["noise_floor_rms_W"]), dtype=float),
                 np.asarray(noise_metrics["snr_linear"], dtype=float),
                 np.asarray(noise_metrics["snr_db"], dtype=float),
-                power_observed / rain_common_max,
+                power_signal / rain_common_max,
             ]
         save_power_curve(
             figures / "fig11_rain_power.png",
