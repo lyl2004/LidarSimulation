@@ -1929,8 +1929,8 @@ _DEFAULTS: dict = {
     "molecular-depol-ratio": 0.00365,
     # Fog scenarios: {scenario: {field: value}}
     "fog": {
-        "radiation_fog": {"n0_cm3": 200.0, "rg_um": 2.0,  "sigma_g": 1.4, "m_real": 1.314, "m_imag": 1.0e-4},
-        "advection_fog": {"n0_cm3": 40.0,  "rg_um": 7.0,  "sigma_g": 1.8, "m_real": 1.314, "m_imag": 1.0e-4},
+        "radiation_fog": {"n0_cm3": 50.0, "rg_um": 2.0,  "sigma_g": 1.4, "m_real": 1.314, "m_imag": 1.0e-4},
+        "advection_fog": {"n0_cm3": 5.0,  "rg_um": 7.0,  "sigma_g": 1.8, "m_real": 1.314, "m_imag": 1.0e-4},
     },
     # Haze scenarios: {scenario: {mode_name: {field: value}}}
     "haze": {

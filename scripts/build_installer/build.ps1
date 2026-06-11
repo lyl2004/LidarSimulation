@@ -229,6 +229,7 @@ Write-Step "预装 Julia 项目依赖（离线首跑保障）"
 $juliaExe = Join-Path $juliaDir "bin\julia.exe"
 $juliaProject = Join-Path $repoRoot "temp\lidar_1d\julia"
 $juliaDepotDist = Join-Path $distDir "julia_depot"
+$reuseJuliaDepot = $false
 Assert-Exists $juliaExe "Julia executable not found in dist/julia/bin"
 Assert-Exists $juliaProject "Julia project not found: temp/lidar_1d/julia"
 
@@ -244,6 +245,7 @@ if (Test-Path $juliaDepotDist) {
             Write-Warning "无法完全删除旧 Julia depot（将复用目录继续更新）: $($_.Exception.Message)"
         }
     } else {
+        $reuseJuliaDepot = $true
         Write-Host "  复用已有 Julia depot（使用 -Repack 强制重建）: $juliaDepotDist"
     }
 }
@@ -252,9 +254,14 @@ New-Item -ItemType Directory -Force -Path $juliaDepotDist | Out-Null
 $oldDepot = $env:JULIA_DEPOT_PATH
 try {
     $env:JULIA_DEPOT_PATH = $juliaDepotDist
-    Write-Host "  Julia instantiate（下载包源码到 depot）..."
-    & $juliaExe "--project=$juliaProject" -e "using Pkg; Pkg.instantiate()"
-    if ($LASTEXITCODE -ne 0) { Write-Error "Julia Pkg.instantiate() 失败"; exit 1 }
+    $reuseDepotPackages = Test-Path (Join-Path $juliaDepotDist "packages")
+    if ($reuseJuliaDepot -and $reuseDepotPackages) {
+        Write-Host "  复用已有 Julia depot，跳过 instantiate"
+    } else {
+        Write-Host "  Julia instantiate（下载包源码到 depot）..."
+        & $juliaExe "--project=$juliaProject" -e "using Pkg; Pkg.instantiate()"
+        if ($LASTEXITCODE -ne 0) { Write-Error "Julia Pkg.instantiate() 失败"; exit 1 }
+    }
 
     Write-Host "  Julia smoke test（验证包源码完整性）..."
     & $juliaExe "--project=$juliaProject" -e "using JSON3, TransitionMatrices; @assert isdefined(Main, :JSON3)"

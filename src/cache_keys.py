@@ -114,8 +114,8 @@ class RainSpec:
 # ---------------------------------------------------------------------------
 def default_fog_specs() -> list[FogSpec]:
     return [
-        FogSpec("radiation_fog", "Radiation fog", n0_cm3=200.0, rg_um=2.0, sigma_g=1.4),
-        FogSpec("advection_fog", "Advection fog", n0_cm3=40.0, rg_um=7.0, sigma_g=1.8),
+        FogSpec("radiation_fog", "Radiation fog", n0_cm3=50.0, rg_um=2.0, sigma_g=1.4),
+        FogSpec("advection_fog", "Advection fog", n0_cm3=5.0, rg_um=7.0, sigma_g=1.8),
     ]
 
 
