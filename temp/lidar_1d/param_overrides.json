@@ -1,0 +1,37 @@
+{
+  "fog": {},
+  "haze": {},
+  "rain": {},
+  "cli": {
+    "wavelength-nm": 1550.0,
+    "range-max-m": 30000.0,
+    "range-step-m": 1.0,
+    "alpha-mol": 1.6e-07,
+    "beta-mol": 1.9e-08,
+    "molecular-depol-ratio": 0.00365,
+    "system-constant": 9.424777960769381
+  },
+  "instrument": {
+    "laser_peak_power_W": 50.0,
+    "pulse_width_s": 2e-07,
+    "receiver_radius_m": 0.05,
+    "optical_efficiency": 0.8,
+    "receiver_noise": {
+      "enabled": true,
+      "quantum_efficiency": 0.6,
+      "background_power_W": 1e-12,
+      "average_pulses": 1000,
+      "generate_noisy_curve": false,
+      "random_seed": 202606
+    }
+  },
+  "profile": {
+    "mode": "ideal_layered",
+    "aerosol_boundary_beta0_m_inv_sr": 2.47e-06,
+    "aerosol_boundary_scale_height_m": 2000.0,
+    "aerosol_layer_beta0_m_inv_sr": 5.13e-09,
+    "aerosol_layer_center_m": 20000.0,
+    "aerosol_layer_width_m": 6000.0,
+    "aerosol_lidar_ratio_sr": 50.0
+  }
+}
