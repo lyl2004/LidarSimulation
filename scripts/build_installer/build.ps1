@@ -23,6 +23,8 @@
 #>
 param(
     [string]$AppVersion = "1.0",
+    [string]$PackagedHistoryRunId = "run_20260612_193512",
+    [string]$PackagedHistoryDisplayName = "分层大气测试用例",
     [switch]$Repack,
     [switch]$CleanBuild
 )
@@ -69,6 +71,11 @@ function Assert-Exists([string]$path, [string]$hint) {
         Write-Error "找不到: $path`n提示: $hint"
         exit 1
     }
+}
+
+function Write-JsonFile([string]$Path, $Payload) {
+    $json = $Payload | ConvertTo-Json -Depth 100
+    $json | Out-File -FilePath $Path -Encoding utf8
 }
 
 # --------------------------------------------------------------------------
@@ -312,29 +319,65 @@ if (Test-Path (Join-Path $seedExportRoot "manifest.json")) {
 }
 
 # --------------------------------------------------------------------------
-# 3.7. Copy local history/runtime state (local reproducibility assets)
+# 3.7. Copy selected local history/runtime state (local reproducibility assets)
 # --------------------------------------------------------------------------
-Write-Step "复制本地历史记录与运行态（如果存在）"
+Write-Step "复制指定本地历史记录与运行态（如果存在）"
 $historySrc = Join-Path $repoRoot "temp\lidar_1d\run_history"
 $historyDist = Join-Path $distDir "run_history"
 $runtimeStateSrc = Join-Path $repoRoot "temp\lidar_1d\runtime_state"
 $runtimeStateDist = Join-Path $distDir "runtime_state"
 
-if (Test-Path $historySrc) {
-    Write-Host "  发现历史记录，复制到 dist/"
-    Copy-Tree $historySrc $historyDist
-    Write-Host "  历史记录已复制"
+if (-not [string]::IsNullOrWhiteSpace($PackagedHistoryRunId)) {
+    Assert-Exists $historySrc "请先生成本地历史记录 temp/lidar_1d/run_history/"
+    $manifestSrc = Join-Path $historySrc "manifest.json"
+    Assert-Exists $manifestSrc "历史记录 manifest 缺失。"
+    $runSrc = Join-Path $historySrc $PackagedHistoryRunId
+    Assert-Exists $runSrc "指定历史 run 不存在：$PackagedHistoryRunId"
+
+    Write-Host "  仅复制指定历史 run: $PackagedHistoryRunId"
+    if (Test-Path $historyDist) {
+        Remove-Item -Path $historyDist -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $historyDist | Out-Null
+    Copy-Item -Path $runSrc -Destination (Join-Path $historyDist $PackagedHistoryRunId) -Recurse -Force
+
+    $manifestData = Get-Content $manifestSrc -Raw | ConvertFrom-Json
+    $selectedRun = @($manifestData.runs) | Where-Object { $_.id -eq $PackagedHistoryRunId } | Select-Object -First 1
+    if (-not $selectedRun) {
+        Write-Error "manifest.json 中找不到指定历史 run: $PackagedHistoryRunId"
+        exit 1
+    }
+    $packagedRun = [ordered]@{
+        id = [string]$selectedRun.id
+        timestamp = [string]$selectedRun.timestamp
+        label = $PackagedHistoryDisplayName
+        display_name = $PackagedHistoryDisplayName
+        precision = [string]$selectedRun.precision
+        origin = [string]$selectedRun.origin
+        summary_sha256 = [string]$selectedRun.summary_sha256
+        cache_identity = $selectedRun.cache_identity
+        name_updated_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    }
+
+    $packagedManifest = [ordered]@{
+        runs = @($packagedRun)
+        active_id = "default"
+    }
+    Write-JsonFile (Join-Path $historyDist "manifest.json") $packagedManifest
+    Write-Host "  历史记录快照已生成：仅包含 '$PackagedHistoryDisplayName'"
 } else {
-    Write-Host "  未找到历史记录: $historySrc"
+    Write-Host "  未指定打包历史 run，跳过历史记录复制"
 }
 
-if (Test-Path $runtimeStateSrc) {
-    Write-Host "  发现运行态 active view，复制到 dist/"
-    Copy-Tree $runtimeStateSrc $runtimeStateDist
-    Write-Host "  运行态已复制"
-} else {
-    Write-Host "  未找到运行态目录: $runtimeStateSrc"
+if (Test-Path $runtimeStateDist) {
+    Remove-Item -Path $runtimeStateDist -Recurse -Force
 }
+New-Item -ItemType Directory -Force -Path $runtimeStateDist | Out-Null
+Write-JsonFile (Join-Path $runtimeStateDist "active_view.json") ([ordered]@{
+    run_id = "default"
+    updated_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+})
+Write-Host "  运行态已初始化为默认结果"
 
 # --------------------------------------------------------------------------
 # 4. Compile Go launcher

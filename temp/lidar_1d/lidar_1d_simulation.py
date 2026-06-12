@@ -57,6 +57,8 @@ if str(SRC) not in sys.path:
 from diagnostics import get_or_create_session, new_component_logger  # noqa: E402
 from mie_core import AutoMieQ, mie_effective_polarized  # noqa: E402
 from path_resolver import resolve_julia_executable as _resolve_julia_unified, get_root as _get_root, get_julia_depot_path as _get_julia_depot_path  # noqa: E402
+from atmosphere_profile import build_ideal_layered_profile, normalize_profile_config  # noqa: E402
+from lidar_profile_solver import solve_power_from_profile  # noqa: E402
 import cache_keys as _cache_keys  # noqa: E402
 import cache_runtime as _cache_runtime  # noqa: E402
 
@@ -164,8 +166,6 @@ DEFAULT_NOISE_MODEL = {
     "enabled": True,
     "quantum_efficiency": 0.6,
     "background_power_W": 1.0e-12,
-    "dark_current_A": 1.0e-9,
-    "read_noise_e": 10.0,
     "average_pulses": 1000,
     "generate_noisy_curve": False,
     "random_seed": 202606,
@@ -280,8 +280,6 @@ class NoiseModel:
     enabled: bool = True
     quantum_efficiency: float = 0.6
     background_power_W: float = 1.0e-12
-    dark_current_A: float = 1.0e-9
-    read_noise_e: float = 10.0
     average_pulses: int = 1000
     generate_noisy_curve: bool = False
     random_seed: int | None = 202606
@@ -1455,8 +1453,6 @@ def resolve_noise_model(overrides: dict | None = None) -> NoiseModel:
         enabled=_bool_from_value(raw.get("enabled"), bool(defaults["enabled"])),
         quantum_efficiency=max(float(raw.get("quantum_efficiency", defaults["quantum_efficiency"])), 1.0e-12),
         background_power_W=max(float(raw.get("background_power_W", defaults["background_power_W"])), 0.0),
-        dark_current_A=max(float(raw.get("dark_current_A", defaults["dark_current_A"])), 0.0),
-        read_noise_e=max(float(raw.get("read_noise_e", defaults["read_noise_e"])), 0.0),
         average_pulses=average_pulses,
         generate_noisy_curve=_bool_from_value(raw.get("generate_noisy_curve"), bool(defaults["generate_noisy_curve"])),
         random_seed=random_seed,
@@ -1470,8 +1466,6 @@ def noise_model_snapshot(noise: NoiseModel, *, wavelength_nm: float, gate_time_s
         "snr_definition": "SNR=N_signal/sigma_noise, SNR_dB=20log10(SNR)",
         "quantum_efficiency": float(noise.quantum_efficiency),
         "background_power_W": float(noise.background_power_W),
-        "dark_current_A": float(noise.dark_current_A),
-        "read_noise_e": float(noise.read_noise_e),
         "average_pulses": int(noise.average_pulses),
         "gate_time_s": float(gate_time_s),
         "wavelength_nm": float(wavelength_nm),
@@ -1502,7 +1496,6 @@ def compute_noise_metrics(
             "snr_db": nan_arr,
             "signal_photoelectrons": nan_arr,
             "background_photoelectrons": 0.0,
-            "dark_photoelectrons": 0.0,
         }
 
     photon_energy = PLANCK_CONSTANT_J_S * LIDAR_C_M_S / (float(wavelength_nm) * 1.0e-9)
@@ -1513,8 +1506,7 @@ def compute_noise_metrics(
 
     signal_e = np.maximum(power_signal, 0.0) * electron_per_watt
     background_e = float(noise.background_power_W) * electron_per_watt
-    dark_e = float(noise.dark_current_A) * gate_time / ELECTRON_CHARGE_C
-    fixed_var_e = max(background_e, 0.0) + max(dark_e, 0.0) + float(noise.read_noise_e) ** 2
+    fixed_var_e = max(background_e, 0.0)
     total_var_e = np.maximum(signal_e + fixed_var_e, 0.0)
     sigma_e_avg = np.sqrt(total_var_e / avg)
     noise_std_power = sigma_e_avg / electron_per_watt
@@ -1546,7 +1538,6 @@ def compute_noise_metrics(
         "snr_db": snr_db,
         "signal_photoelectrons": signal_e,
         "background_photoelectrons": float(background_e),
-        "dark_photoelectrons": float(dark_e),
     }
 
 
@@ -1845,6 +1836,9 @@ def build_effective_params_snapshot(
     precision_profile: str,
     instrument_parameters: dict[str, float],
     noise_model: NoiseModel,
+    profile_model: dict[str, object] | None = None,
+    range_max_m: float | None = None,
+    range_step_m: float | None = None,
 ) -> dict[str, object]:
     """Persist the effective run inputs in the UI override schema."""
     return {
@@ -1881,6 +1875,8 @@ def build_effective_params_snapshot(
         },
         "cli": {
             "wavelength-nm": float(wavelength_nm),
+            "range-max-m": float(range_max_m) if range_max_m is not None else 2000.0,
+            "range-step-m": float(range_step_m) if range_step_m is not None else 1.0,
             "alpha-mol": float(alpha_mol),
             "beta-mol": float(beta_mol),
             "molecular-depol-ratio": float(molecular_depol_ratio),
@@ -1895,15 +1891,195 @@ def build_effective_params_snapshot(
                 "enabled": bool(noise_model.enabled),
                 "quantum_efficiency": float(noise_model.quantum_efficiency),
                 "background_power_W": float(noise_model.background_power_W),
-                "dark_current_A": float(noise_model.dark_current_A),
-                "read_noise_e": float(noise_model.read_noise_e),
                 "average_pulses": int(noise_model.average_pulses),
                 "generate_noisy_curve": bool(noise_model.generate_noisy_curve),
                 "random_seed": noise_model.random_seed,
             },
         },
         "precision": str(precision_profile),
+        "profile": dict(profile_model or {"mode": "uniform"}),
     }
+
+
+def resolve_profile_model(args: argparse.Namespace, overrides: dict | None = None) -> dict[str, object]:
+    profile_overrides = {}
+    if isinstance(overrides, dict) and isinstance(overrides.get("profile"), dict):
+        profile_overrides = dict(overrides.get("profile", {}))
+    if "mode" not in profile_overrides:
+        profile_overrides["mode"] = str(getattr(args, "atmosphere_profile_mode", "uniform") or "uniform")
+    for key in (
+        "range_max_m",
+        "range_step_m",
+        "molecular_scale_height_m",
+        "molecular_beta0_m_inv_sr",
+        "aerosol_boundary_beta0_m_inv_sr",
+        "aerosol_boundary_scale_height_m",
+        "aerosol_layer_beta0_m_inv_sr",
+        "aerosol_layer_center_m",
+        "aerosol_layer_width_m",
+        "aerosol_lidar_ratio_sr",
+    ):
+        if key not in profile_overrides and hasattr(args, key):
+            profile_overrides[key] = getattr(args, key)
+    return normalize_profile_config(profile_overrides)
+
+
+def _profile_mode(model: dict[str, object]) -> str:
+    return str(model.get("mode", "uniform") or "uniform").strip().lower()
+
+
+def _run_layered_atmosphere_mode(
+    args: argparse.Namespace,
+    *,
+    out: Path,
+    figures: Path,
+    data: Path,
+    summaries: dict[str, dict[str, object]],
+    noise_model: NoiseModel,
+    noise_rng: np.random.Generator | None,
+    profile_model: dict[str, object],
+    instrument: dict[str, float],
+    precision: str,
+) -> None:
+    tau_s = float(instrument["pulse_width_s"])
+    layered_profile = build_ideal_layered_profile(
+        wavelength_nm=WAVELENGTH_NM,
+        profile=profile_model,
+        range_max_m=args.range_max_m,
+        range_step_m=args.range_step_m,
+    )
+    summaries["global"]["range_min_m"] = float(layered_profile.range_m[0])
+    summaries["global"]["range_max_m"] = float(layered_profile.range_m[-1])
+    summaries["global"]["range_step_m"] = float(layered_profile.range_m[1] - layered_profile.range_m[0]) if len(layered_profile.range_m) > 1 else float(args.range_step_m)
+    profile_result = solve_power_from_profile(
+        range_m=layered_profile.range_m,
+        alpha_profile_m_inv=layered_profile.alpha_total_m_inv,
+        beta_profile_m_inv_sr=layered_profile.beta_total_m_inv_sr,
+        system_constant=args.system_constant,
+        overlap=overlap_profile(layered_profile.range_m),
+    )
+    noise_metrics = compute_noise_metrics(
+        profile_result["power_signal_raw"],
+        wavelength_nm=WAVELENGTH_NM,
+        gate_time_s=tau_s,
+        noise=noise_model,
+        rng=noise_rng,
+    )
+    power_observed = np.asarray(noise_metrics["power_observed_raw"], dtype=float)
+
+    write_curve_csv(
+        data / "layered_atmosphere_profile.csv",
+        [
+            "range_m",
+            "beta_molecular_m_inv_sr",
+            "beta_aerosol_m_inv_sr",
+            "beta_total_m_inv_sr",
+            "alpha_molecular_m_inv",
+            "alpha_aerosol_m_inv",
+            "alpha_total_m_inv",
+        ],
+        zip(
+            layered_profile.range_m,
+            layered_profile.beta_molecular_m_inv_sr,
+            layered_profile.beta_aerosol_m_inv_sr,
+            layered_profile.beta_total_m_inv_sr,
+            layered_profile.alpha_molecular_m_inv,
+            layered_profile.alpha_aerosol_m_inv,
+            layered_profile.alpha_total_m_inv,
+        ),
+    )
+    write_curve_csv(
+        data / "layered_atmosphere_power.csv",
+        [
+            "range_m",
+            "two_way_transmittance",
+            "power_signal_raw",
+            "power_observed_expected_raw",
+            "power_observed_raw",
+            "power_observed_noisy_raw",
+            "noise_std_power_W",
+            "noise_floor_rms_W",
+            "snr_linear",
+            "snr_db",
+        ],
+        zip(
+            profile_result["range_m"],
+            profile_result["two_way_transmittance"],
+            profile_result["power_signal_raw"],
+            np.asarray(noise_metrics["power_observed_expected_raw"], dtype=float),
+            power_observed,
+            np.asarray(noise_metrics["power_observed_noisy_raw"], dtype=float),
+            np.asarray(noise_metrics["noise_std_power_W"], dtype=float),
+            np.full_like(profile_result["range_m"], float(noise_metrics["noise_floor_rms_W"]), dtype=float),
+            np.asarray(noise_metrics["snr_linear"], dtype=float),
+            np.asarray(noise_metrics["snr_db"], dtype=float),
+        ),
+    )
+    save_power_curve(
+        figures / "fig12_layered_atmosphere_power.png",
+        profile_result["range_m"],
+        [("分层大气", profile_result["power_signal_raw"])],
+        "分层大气距离门回波功率",
+        ylabel="回波功率 P(R) (W)",
+        dual_scale=True,
+    )
+    save_power_curve(
+        figures / "fig13_layered_atmosphere_beta_profile.png",
+        layered_profile.range_m,
+        [
+            ("分子后向散射", layered_profile.beta_molecular_m_inv_sr),
+            ("气溶胶后向散射", layered_profile.beta_aerosol_m_inv_sr),
+            ("总后向散射", layered_profile.beta_total_m_inv_sr),
+        ],
+        "分层大气后向散射系数剖面",
+        ylabel="β(R)  (m⁻¹sr⁻¹)",
+        yscale="log",
+    )
+    save_power_curve(
+        figures / "fig14_layered_atmosphere_alpha_profile.png",
+        layered_profile.range_m,
+        [
+            ("分子消光", layered_profile.alpha_molecular_m_inv),
+            ("气溶胶消光", layered_profile.alpha_aerosol_m_inv),
+            ("总消光", layered_profile.alpha_total_m_inv),
+        ],
+        "分层大气消光系数剖面",
+        ylabel="α(R)  (m⁻¹)",
+        yscale="log",
+    )
+
+    summaries["layered_atmosphere"] = {
+        "mode": "ideal_layered",
+        "profile_model": profile_model,
+        "profile_summary": {
+            "beta_total_min": float(np.min(layered_profile.beta_total_m_inv_sr)),
+            "beta_total_max": float(np.max(layered_profile.beta_total_m_inv_sr)),
+            "alpha_total_min": float(np.min(layered_profile.alpha_total_m_inv)),
+            "alpha_total_max": float(np.max(layered_profile.alpha_total_m_inv)),
+            "max_two_way_transmittance": float(np.max(profile_result["two_way_transmittance"])),
+            "min_two_way_transmittance": float(np.min(profile_result["two_way_transmittance"])),
+        },
+        "power_raw": raw_power_summary(
+            profile_result["range_m"],
+            profile_result["power_signal_raw"],
+            power_observed,
+        ),
+        "snr_summary": snr_curve_summary(
+            profile_result["range_m"],
+            np.asarray(noise_metrics["snr_linear"], dtype=float),
+            np.asarray(noise_metrics["snr_db"], dtype=float),
+        ),
+        "curve_files": {
+            "profile_csv": "layered_atmosphere_profile.csv",
+            "power_csv": "layered_atmosphere_power.csv",
+            "power_figure": "fig12_layered_atmosphere_power.png",
+            "beta_figure": "fig13_layered_atmosphere_beta_profile.png",
+            "alpha_figure": "fig14_layered_atmosphere_alpha_profile.png",
+        },
+    }
+
+    print(f"[done] layered atmosphere figures: {figures}")
+    print(f"[done] layered atmosphere data: {data}")
 
 
 def apply_fog_overrides(specs: list[FogSpec], overrides: dict) -> list[FogSpec]:
@@ -2158,6 +2334,7 @@ def run(args: argparse.Namespace) -> int:
     _inst_ov = overrides.get("instrument", {}) if overrides else {}
     _instrument = resolve_instrument_parameters(args.system_constant, _inst_ov)
     _noise_model = resolve_noise_model(overrides)
+    _profile_model = resolve_profile_model(args, overrides)
     _noise_rng = np.random.default_rng(_noise_model.random_seed) if _noise_model.generate_noisy_curve else None
     _p0_w = _instrument["laser_peak_power_W"]
     _tau_s = _instrument["pulse_width_s"]
@@ -2208,6 +2385,8 @@ def run(args: argparse.Namespace) -> int:
                 wavelength_nm=WAVELENGTH_NM,
                 gate_time_s=_tau_s,
             ),
+            "atmosphere_profile_mode": _profile_mode(_profile_model),
+            "atmosphere_profile_model": _profile_model,
             "overlap": {
                 "mode": "ideal",
                 "blind_range_m": 0.0,
@@ -2289,6 +2468,20 @@ def run(args: argparse.Namespace) -> int:
             "julia_threads": args.julia_threads,
         },
     )
+
+    if _profile_mode(_profile_model) == "ideal_layered":
+        _run_layered_atmosphere_mode(
+            args,
+            out=out,
+            figures=figures,
+            data=data,
+            summaries=summaries,
+            noise_model=_noise_model,
+            noise_rng=_noise_rng,
+            profile_model=_profile_model,
+            instrument=_instrument,
+            precision=precision,
+        )
 
     print(f"[info] output: {out}")
     print(f"[info] range grid: {len(range_m)} points, {range_m[0]:.0f}-{range_m[-1]:.0f} m, dR={args.range_step_m:g} m")
@@ -3022,9 +3215,12 @@ def run(args: argparse.Namespace) -> int:
         "pulse_width_s": _tau_s,
         "receiver_radius_m": _r_m,
         "optical_efficiency": _eta,
+        "range_max_m": float(range_m[-1]),
+        "range_step_m": float(args.range_step_m),
     }
     _instrument_hash = _cache_keys.instrument_hash(_instr_for_hash)
     _noise_hash = _cache_keys.noise_hash(asdict(_noise_model))
+    _profile_hash = _cache_keys.profile_hash(_profile_model)
     summaries["cache_identity"] = {
         "fog_key": fog_key,
         "haze_key": haze_key,
@@ -3032,11 +3228,12 @@ def run(args: argparse.Namespace) -> int:
         "rain_key": rain_key,
         "instrument_hash": _instrument_hash,
         "noise_hash": _noise_hash,
+        "profile_hash": _profile_hash,
         "identity": _cache_keys.compose_run_identity(
-            fog_key, haze_key, mueller_key, rain_key, _instrument_hash, _noise_hash
+            fog_key, haze_key, mueller_key, rain_key, _instrument_hash, _noise_hash, _profile_hash
         ),
         "precision_profile": precision,
-        "schema_version": 2 if _noise_hash else 1,
+        "schema_version": 3 if (_noise_hash or _profile_hash) else 1,
     }
     params_snapshot = build_effective_params_snapshot(
         fog_specs,
@@ -3050,6 +3247,9 @@ def run(args: argparse.Namespace) -> int:
         precision_profile=precision,
         instrument_parameters=_instrument,
         noise_model=_noise_model,
+        profile_model=_profile_model,
+        range_max_m=float(range_m[-1]),
+        range_step_m=float(args.range_step_m),
     )
     with (out / "summary.json").open("w", encoding="utf-8") as fh:
         json.dump(summaries, fh, ensure_ascii=False, indent=2)
@@ -3144,6 +3344,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wavelength-nm", type=float, default=None, help="Override laser wavelength (nm). Default: built-in value.")
     parser.add_argument("--alpha-mol", type=float, default=None, help="Override molecular extinction coefficient (m⁻¹).")
     parser.add_argument("--beta-mol", type=float, default=None, help="Override molecular backscatter coefficient (m⁻¹sr⁻¹).")
+    parser.add_argument("--atmosphere-profile-mode", choices=["uniform", "ideal_layered"], default="uniform")
+    parser.add_argument("--molecular-scale-height-m", type=float, default=7000.0)
+    parser.add_argument("--molecular-beta0-m-inv-sr", type=float, default=1.54e-6)
+    parser.add_argument("--aerosol-boundary-beta0-m-inv-sr", type=float, default=2.47e-6)
+    parser.add_argument("--aerosol-boundary-scale-height-m", type=float, default=2000.0)
+    parser.add_argument("--aerosol-layer-beta0-m-inv-sr", type=float, default=5.13e-9)
+    parser.add_argument("--aerosol-layer-center-m", type=float, default=20000.0)
+    parser.add_argument("--aerosol-layer-width-m", type=float, default=6000.0)
+    parser.add_argument("--aerosol-lidar-ratio-sr", type=float, default=50.0)
     parser.add_argument("--clean", action="store_true", help="Remove previous output files before running.")
     return parser
 

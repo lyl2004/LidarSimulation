@@ -49,11 +49,21 @@ DEFAULT_NOISE_MODEL = {
     "enabled": True,
     "quantum_efficiency": 0.6,
     "background_power_W": 1.0e-12,
-    "dark_current_A": 1.0e-9,
-    "read_noise_e": 10.0,
     "average_pulses": 1000,
     "generate_noisy_curve": False,
     "random_seed": 202606,
+}
+
+DEFAULT_PROFILE_MODEL = {
+    "mode": "uniform",
+    "molecular_scale_height_m": 7000.0,
+    "molecular_beta0_m_inv_sr": 1.54e-6,
+    "aerosol_boundary_beta0_m_inv_sr": 2.47e-6,
+    "aerosol_boundary_scale_height_m": 2000.0,
+    "aerosol_layer_beta0_m_inv_sr": 5.13e-9,
+    "aerosol_layer_center_m": 20000.0,
+    "aerosol_layer_width_m": 6000.0,
+    "aerosol_lidar_ratio_sr": 50.0,
 }
 
 
@@ -355,16 +365,20 @@ INSTRUMENT_FIELDS = (
     "pulse_width_s",
     "receiver_radius_m",
     "optical_efficiency",
+    "range_max_m",
+    "range_step_m",
 )
 
 
 def instrument_hash(instrument: dict) -> str:
-    """对仪器维度字段做 sha256;缺失字段用 LIDAR_* 默认值填充。"""
+    """对输出重建维度字段做 sha256;缺失字段用默认值填充。"""
     payload = {
         "laser_peak_power_W": float(instrument.get("laser_peak_power_W", LIDAR_P0_W)),
         "pulse_width_s": float(instrument.get("pulse_width_s", LIDAR_PULSE_WIDTH_S)),
         "receiver_radius_m": float(instrument.get("receiver_radius_m", LIDAR_RECEIVER_RADIUS_M)),
         "optical_efficiency": float(instrument.get("optical_efficiency", LIDAR_OPTICAL_EFFICIENCY)),
+        "range_max_m": float(instrument.get("range_max_m", 2000.0)),
+        "range_step_m": float(instrument.get("range_step_m", 1.0)),
     }
     return _sha256_json(payload)
 
@@ -400,8 +414,6 @@ def normalize_noise_model(noise: dict | None) -> dict:
         "enabled": _bool_from_value(raw.get("enabled"), bool(defaults["enabled"])),
         "quantum_efficiency": max(float(raw.get("quantum_efficiency", defaults["quantum_efficiency"])), 1.0e-12),
         "background_power_W": max(float(raw.get("background_power_W", defaults["background_power_W"])), 0.0),
-        "dark_current_A": max(float(raw.get("dark_current_A", defaults["dark_current_A"])), 0.0),
-        "read_noise_e": max(float(raw.get("read_noise_e", defaults["read_noise_e"])), 0.0),
         "average_pulses": avg,
         "generate_noisy_curve": _bool_from_value(raw.get("generate_noisy_curve"), bool(defaults["generate_noisy_curve"])),
         "random_seed": seed,
@@ -424,6 +436,29 @@ def noise_hash_from_overrides(overrides: dict | None) -> str | None:
     return noise_hash(overrides.get("noise", {}))
 
 
+def normalize_profile_model(profile: dict | None) -> dict:
+    raw = profile or {}
+    normalized = {"mode": str(raw.get("mode", DEFAULT_PROFILE_MODEL["mode"]) or "uniform").strip().lower()}
+    for key, default in DEFAULT_PROFILE_MODEL.items():
+        if key == "mode":
+            continue
+        normalized[key] = float(raw.get(key, default))
+    return normalized
+
+
+def profile_hash(profile: dict | None) -> str | None:
+    normalized = normalize_profile_model(profile)
+    if normalized["mode"] == "uniform":
+        return None
+    return _sha256_json(normalized)
+
+
+def profile_hash_from_overrides(overrides: dict | None) -> str | None:
+    if not isinstance(overrides, dict):
+        return profile_hash(None)
+    return profile_hash(overrides.get("profile", {}))
+
+
 # ---------------------------------------------------------------------------
 # 派生 run identity
 # ---------------------------------------------------------------------------
@@ -434,11 +469,14 @@ def compose_run_identity(
     rain_key: str,
     instrument_hash_value: str,
     noise_hash_value: str | None = None,
+    profile_hash_value: str | None = None,
 ) -> str:
     """Run identity. When noise is disabled, keep the legacy 5-tuple identity."""
     parts = [fog_key, haze_key, haze_mueller_key, rain_key, instrument_hash_value]
     if noise_hash_value:
         parts.append(noise_hash_value)
+    if profile_hash_value:
+        parts.append(profile_hash_value)
     joined = "|".join(parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
@@ -466,8 +504,19 @@ DEFAULT_ARGS: dict = {
     "molecular_depol_ratio": 0.00365,
     "precision_profile": "high",
     "wavelength_nm": None,
+    "range_max_m": 2000.0,
+    "range_step_m": 1.0,
     "alpha_mol": None,
     "beta_mol": None,
+    "atmosphere_profile_mode": "uniform",
+    "molecular_scale_height_m": 7000.0,
+    "molecular_beta0_m_inv_sr": 1.54e-6,
+    "aerosol_boundary_beta0_m_inv_sr": 2.47e-6,
+    "aerosol_boundary_scale_height_m": 2000.0,
+    "aerosol_layer_beta0_m_inv_sr": 5.13e-9,
+    "aerosol_layer_center_m": 20000.0,
+    "aerosol_layer_width_m": 6000.0,
+    "aerosol_lidar_ratio_sr": 50.0,
 }
 
 
@@ -521,9 +570,20 @@ PRECISION_PRESETS: dict[str, dict] = {
 _CLI_TO_ATTR = {
     "molecular-depol-ratio": "molecular_depol_ratio",
     "wavelength-nm": "wavelength_nm",
+    "range-max-m": "range_max_m",
+    "range-step-m": "range_step_m",
     "alpha-mol": "alpha_mol",
     "beta-mol": "beta_mol",
     "system-constant": "system_constant",
+    "atmosphere-profile-mode": "atmosphere_profile_mode",
+    "molecular-scale-height-m": "molecular_scale_height_m",
+    "molecular-beta0-m-inv-sr": "molecular_beta0_m_inv_sr",
+    "aerosol-boundary-beta0-m-inv-sr": "aerosol_boundary_beta0_m_inv_sr",
+    "aerosol-boundary-scale-height-m": "aerosol_boundary_scale_height_m",
+    "aerosol-layer-beta0-m-inv-sr": "aerosol_layer_beta0_m_inv_sr",
+    "aerosol-layer-center-m": "aerosol_layer_center_m",
+    "aerosol-layer-width-m": "aerosol_layer_width_m",
+    "aerosol-lidar-ratio-sr": "aerosol_lidar_ratio_sr",
     "fog-grid": "fog_grid",
     "rain-grid": "rain_grid",
     "haze-mie-reference-grid": "haze_mie_reference_grid",
@@ -554,4 +614,11 @@ def args_from_precision(precision: str, overrides: dict | None = None) -> argpar
     for k, v in cli_overrides.items():
         attr = _CLI_TO_ATTR.get(k, k.replace("-", "_"))
         setattr(ns, attr, v)
+    profile_overrides = (overrides or {}).get("profile", {}) if overrides else {}
+    if profile_overrides:
+        setattr(ns, "atmosphere_profile_mode", str(profile_overrides.get("mode", "uniform")))
+        for key, value in normalize_profile_model(profile_overrides).items():
+            if key == "mode":
+                continue
+            setattr(ns, key, value)
     return ns

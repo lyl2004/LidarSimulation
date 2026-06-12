@@ -86,12 +86,16 @@ _DEFAULT_RESULT_ID = cache_runtime.DEFAULT_RESULT_ID
 _active_data_dir:    Path = _OUTPUTS / "data"
 _active_figures_dir: Path = _OUTPUTS / "figures"
 _active_summary:     Path = _OUTPUTS / "summary.json"
+_csv_cache: dict[str, dict[str, list[float]]] = {}
 
 
 def _refresh_active_paths(run_id: str | None = None) -> str | None:
     global _active_data_dir, _active_figures_dir, _active_summary
     paths = cache_runtime.get_run_paths(run_id)
-    _active_data_dir = paths["data"]
+    new_data = paths["data"]
+    if new_data != _active_data_dir:
+        _csv_cache.clear()
+    _active_data_dir = new_data
     _active_figures_dir = paths["figures"]
     _active_summary = paths["summary"]
     return paths.get("run_id")
@@ -137,6 +141,9 @@ _EXPORT_CURVES: dict[str, tuple[str, str, str]] = {
     "fig11a_LightRain_SNR.csv":              ("rain_power.csv",                            "range_m", "light_rain_snr_db"),
     "fig11b_ModerateRain_SNR.csv":           ("rain_power.csv",                            "range_m", "moderate_rain_snr_db"),
     "fig11c_HeavyRain_SNR.csv":              ("rain_power.csv",                            "range_m", "heavy_rain_snr_db"),
+    "fig12_LayeredAtmosphere.csv":           ("layered_atmosphere_power.csv",              "range_m", "power_signal_raw"),
+    "fig13_LayeredBeta.csv":                 ("layered_atmosphere_profile.csv",            "range_m", "beta_total_m_inv_sr"),
+    "fig14_LayeredAlpha.csv":                ("layered_atmosphere_profile.csv",            "range_m", "alpha_total_m_inv"),
 }
 
 
@@ -272,25 +279,71 @@ PAL: dict[str, str] = {
     "light_rain":             "#0099cc",   # 青蓝
     "moderate_rain":          "#004499",   # 深蓝
     "heavy_rain":             "#000033",   # 近黑蓝
+    "layered_atmosphere":     "#cc00cc",   # 品红
 }
 
 # ---------------------------------------------------------------------------
 # Data loading — always reads from the currently active run
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# CSV cache — keyed by filename, invalidated when active data dir changes
+# ---------------------------------------------------------------------------
+
 def load_csv(fname: str) -> dict[str, list[float]]:
+    if fname in _csv_cache:
+        return _csv_cache[fname]
     p = _DATA_DIR() / fname
     if not p.exists():
         return {}
-    out: dict[str, list[float]] = {}
-    with open(p, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            for k, v in row.items():
-                try:
-                    out.setdefault(k, []).append(float(v))
-                except (ValueError, TypeError):
-                    out.setdefault(k, []).append(0.0)
+    try:
+        import numpy as _np
+        with open(p, newline="", encoding="utf-8") as f:
+            header = f.readline().rstrip("\r\n").split(",")
+            data = _np.loadtxt(f, delimiter=",", dtype=float)
+        if data.ndim == 1:
+            data = data.reshape(1, -1)
+        out: dict[str, list[float]] = {col: data[:, i].tolist() for i, col in enumerate(header)}
+    except ImportError:
+        # numpy not available in this env — fast stdlib fallback
+        out = {}
+        with open(p, encoding="utf-8") as f:
+            header = f.readline().rstrip("\r\n").split(",")
+            for col in header:
+                out[col] = []
+            for line in f:
+                parts = line.rstrip("\r\n").split(",")
+                for col, v in zip(header, parts):
+                    try:
+                        out[col].append(float(v))
+                    except (ValueError, TypeError):
+                        out[col].append(0.0)
+    except Exception:
+        out = {}
+        with open(p, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                for k, v in row.items():
+                    try:
+                        out.setdefault(k, []).append(float(v))
+                    except (ValueError, TypeError):
+                        out.setdefault(k, []).append(0.0)
+    _csv_cache[fname] = out
     return out
+
+
+_DISPLAY_MAX_POINTS = 2000  # cap for UI rendering; full data still in cache
+
+
+def load_csv_display(fname: str) -> dict[str, list[float]]:
+    """Like load_csv but downsamples to _DISPLAY_MAX_POINTS for Plotly rendering."""
+    full = load_csv(fname)
+    if not full:
+        return full
+    n = len(next(iter(full.values())))
+    if n <= _DISPLAY_MAX_POINTS:
+        return full
+    step = max(1, n // _DISPLAY_MAX_POINTS)
+    return {k: v[::step] for k, v in full.items()}
 
 
 def load_summary() -> dict:
@@ -413,7 +466,7 @@ def _layout(title: str, y_label: str, log: bool) -> dict:
             "itemclick": "toggle", "itemdoubleclick": "toggleothers",
         },
         "margin": {"l": 65, "r": 20, "t": 80, "b": 55},
-        "height": 460,
+        "autosize": True,
         "plot_bgcolor": "#fafafa",
         "paper_bgcolor": "#ffffff",
         "hovermode": "x unified",
@@ -447,7 +500,7 @@ def fig_fog_power(log: bool) -> dict:
         ("radiation_fog_power.csv", "辐射雾", "radiation_fog"),
         ("advection_fog_power.csv", "平流雾", "advection_fog"),
     ]:
-        d = load_csv(fname)
+        d = load_csv_display(fname)
         if d:
             traces.append(_trace(
                 d["range_m"],
@@ -471,7 +524,7 @@ def fig_haze_power(log: bool) -> dict:
         ("dust_desert_haze_power.csv",       "沙尘型霾",           "dust_desert_haze"),
         ("maritime_haze_power.csv",          "海洋性霾",            "maritime_haze"),
     ]:
-        d = load_csv(fname)
+        d = load_csv_display(fname)
         if d:
             traces.append(_trace(
                 d["range_m"],
@@ -494,7 +547,7 @@ def fig_haze_depol(log: bool = False) -> dict:  # noqa: ARG001  log ignored
         ("dust_desert_haze_depolarization.csv",       "沙尘型霾",           "dust_desert_haze"),
         ("maritime_haze_depolarization.csv",          "海洋性霾",            "maritime_haze"),
     ]:
-        d = load_csv(fname)
+        d = load_csv_display(fname)
         if d:
             traces.append(_trace(d["range_m"], d["echo_depolarization_ratio"],
                                  label, PAL[key]))
@@ -503,7 +556,7 @@ def fig_haze_depol(log: bool = False) -> dict:  # noqa: ARG001  log ignored
 
 
 def fig_rain_power(log: bool) -> dict:
-    d = load_csv("rain_power.csv")
+    d = load_csv_display("rain_power.csv")
     traces = []
     if d:
         traces = [
@@ -532,6 +585,52 @@ def fig_rain_power(log: bool) -> dict:
             "layout": _layout("雨 — 回波功率 P(R)", "P(R)  (W)", log)}
 
 
+def fig_layered_power(log: bool) -> dict:
+    d = load_csv_display("layered_atmosphere_power.csv")
+    traces = []
+    if d:
+        traces.append(_trace(
+            d["range_m"],
+            _power_curve(d, "power_signal_raw", "power_observed_raw"),
+            "分层大气",
+            "#8b1e3f",
+        ))
+        if d.get("noise_floor_rms_W"):
+            traces.append(_constant_trace(d["range_m"], d["noise_floor_rms_W"][0], "噪声底 RMS", "#666666"))
+    return {"data": traces,
+            "layout": _layout("分层大气 — 回波功率 P(R)", "P(R)  (W)", log)}
+
+
+def fig_layered_beta(log: bool) -> dict:
+    d = load_csv_display("layered_atmosphere_profile.csv")
+    traces = []
+    if d:
+        for col, label, color, dash in [
+            ("beta_molecular_m_inv_sr", "分子后向散射", "#3366cc", "dot"),
+            ("beta_aerosol_m_inv_sr", "气溶胶后向散射", "#cc3333", "dash"),
+            ("beta_total_m_inv_sr", "总后向散射", "#228833", "solid"),
+        ]:
+            if col in d:
+                traces.append(_trace(d["range_m"], d[col], label, color, dash))
+    return {"data": traces,
+            "layout": _layout("分层大气 — 后向散射系数 β(R)", "β(R)  (m⁻¹sr⁻¹)", log)}
+
+
+def fig_layered_alpha(log: bool) -> dict:
+    d = load_csv_display("layered_atmosphere_profile.csv")
+    traces = []
+    if d:
+        for col, label, color, dash in [
+            ("alpha_molecular_m_inv", "分子消光", "#3366cc", "dot"),
+            ("alpha_aerosol_m_inv", "气溶胶消光", "#cc3333", "dash"),
+            ("alpha_total_m_inv", "总消光", "#228833", "solid"),
+        ]:
+            if col in d:
+                traces.append(_trace(d["range_m"], d[col], label, color, dash))
+    return {"data": traces,
+            "layout": _layout("分层大气 — 消光系数 α(R)", "α(R)  (m⁻¹)", log)}
+
+
 def _threshold_trace(x: list[float], y: float, name: str, color: str) -> dict:
     if not x:
         return {}
@@ -557,11 +656,11 @@ def fig_all_snr(log: bool = False) -> dict:  # noqa: ARG001
         ("dust_desert_haze_power.csv",       "沙尘型霾",        "dust_desert_haze",       "dashdot"),
         ("maritime_haze_power.csv",          "海洋性霾",        "maritime_haze",          "dot"),
     ]:
-        d = load_csv(fname)
+        d = load_csv_display(fname)
         if d and "snr_db" in d:
             x_ref = d["range_m"]
             traces.append(_trace(d["range_m"], d["snr_db"], label, PAL[key], dash))
-    d = load_csv("rain_power.csv")
+    d = load_csv_display("rain_power.csv")
     if d:
         x_ref = d.get("range_m", x_ref)
         for key, label, dash in [
@@ -572,6 +671,10 @@ def fig_all_snr(log: bool = False) -> dict:  # noqa: ARG001
             col = f"{key}_snr_db"
             if col in d:
                 traces.append(_trace(d["range_m"], d[col], label, PAL[key], dash))
+    d = load_csv_display("layered_atmosphere_power.csv")
+    if d and "snr_db" in d:
+        x_ref = d.get("range_m", x_ref)
+        traces.append(_trace(d["range_m"], d["snr_db"], "分层大气", PAL["layered_atmosphere"], "solid"))
     for threshold, name in ((20.0 * math.log10(3.0), "SNR=3"), (20.0 * math.log10(10.0), "SNR=10")):
         t = _threshold_trace(x_ref, threshold, name, "#555555")
         if t:
@@ -591,7 +694,7 @@ def fig_all_power(log: bool) -> dict:
         ("dust_desert_haze_power.csv",       "沙尘型霾",        "dust_desert_haze",       "dashdot"),
         ("maritime_haze_power.csv",          "海洋性霾",         "maritime_haze",          "dot"),
     ]:
-        d = load_csv(fname)
+        d = load_csv_display(fname)
         if d:
             traces.append(_trace(
                 d["range_m"],
@@ -600,7 +703,7 @@ def fig_all_power(log: bool) -> dict:
                 PAL[key],
                 dash,
             ))
-    d = load_csv("rain_power.csv")
+    d = load_csv_display("rain_power.csv")
     if d:
         traces += [
             _trace(
@@ -625,6 +728,15 @@ def fig_all_power(log: bool) -> dict:
                 "dashdot",
             ),
         ]
+    d = load_csv_display("layered_atmosphere_power.csv")
+    if d and "power_signal_raw" in d:
+        traces.append(_trace(
+            d["range_m"],
+            _power_curve(d, "power_signal_raw", "power_observed_raw"),
+            "分层大气",
+            PAL["layered_atmosphere"],
+            "solid",
+        ))
     base = _layout("全场景 — 回波功率对比", "P(R)  (W)", log)
     base["margin"] = {"l": 65, "r": 20, "t": 80, "b": 55}
     return {"data": traces, "layout": base}
@@ -638,7 +750,7 @@ def fig_all_depol(log: bool = False) -> dict:  # noqa: ARG001
         ("dust_desert_haze_depolarization.csv",       "沙尘型霾",           "dust_desert_haze"),
         ("maritime_haze_depolarization.csv",          "海洋性霾",            "maritime_haze"),
     ]:
-        d = load_csv(fname)
+        d = load_csv_display(fname)
         if d:
             traces.append(_trace(d["range_m"], d["echo_depolarization_ratio"],
                                  label, PAL[key]))
@@ -761,8 +873,8 @@ def chart_tab(
             )
 
         # ── plotly chart ──────────────────────────────────────────────────
-        with ui.element("div").classes("w-full"):
-            plotly_elem = ui.plotly(fig_builder(log_state[0])).classes("w-full")
+        with ui.element("div").classes("w-full").style("min-height:420px; overflow:hidden"):
+            plotly_elem = ui.plotly(fig_builder(log_state[0])).classes("w-full h-full")
 
         def redraw() -> None:
             plotly_elem.update_figure(fig_builder(log_state[0]))
@@ -843,8 +955,81 @@ def chart_tab(
                                 if data is not None:
                                     await _native_save(data, _name, [("CSV file", "*.csv")])
                             ui.button(f"↓ {label}", on_click=_dl_csv).props(
-                                "dense flat"
+                                    "dense flat"
                             ).classes("text-sm font-mono text-green-700")
+
+
+def layered_tab(callbacks: list | None = None) -> None:
+    with ui.column().classes("w-full gap-4"):
+        summary = load_summary().get("layered_atmosphere", {})
+        model = summary.get("profile_model", {})
+        with ui.card().classes("w-full p-4 shadow-none border"):
+            ui.label("分层大气回波").classes("font-semibold text-sm text-gray-700 mb-2")
+            if model:
+                desc = (
+                    f"近地衰减高度 = {model.get('aerosol_boundary_scale_height_m', 0):.0f} m；"
+                    f"高空层中心 = {model.get('aerosol_layer_center_m', 0):.0f} m；"
+                    f"高空层厚度 = {model.get('aerosol_layer_width_m', 0):.0f} m"
+                )
+                ui.label(desc).classes("text-xs text-gray-500 mb-2")
+            layered_power_plot = ui.plotly(fig_layered_power(True)).classes("w-full").style("min-height:420px; overflow:hidden")
+
+        with ui.card().classes("w-full p-4 shadow-none border"):
+            ui.label("后向散射系数剖面").classes("font-semibold text-sm text-gray-700 mb-2")
+            layered_beta_plot = ui.plotly(fig_layered_beta(True)).classes("w-full").style("min-height:420px; overflow:hidden")
+
+        with ui.card().classes("w-full p-4 shadow-none border"):
+            ui.label("消光系数剖面").classes("font-semibold text-sm text-gray-700 mb-2")
+            layered_alpha_plot = ui.plotly(fig_layered_alpha(True)).classes("w-full").style("min-height:420px; overflow:hidden")
+
+        def redraw_layered() -> None:
+            layered_power_plot.update_figure(fig_layered_power(True))
+            layered_beta_plot.update_figure(fig_layered_beta(True))
+            layered_alpha_plot.update_figure(fig_layered_alpha(True))
+
+        if callbacks is not None:
+            callbacks.append(redraw_layered)
+
+        with ui.row().classes("items-center gap-3 flex-wrap pt-1"):
+            ui.label("数据下载：").classes("text-sm text-gray-500 font-medium")
+            for label, export_name in [
+                ("分层回波", "fig12_LayeredAtmosphere.csv"),
+                ("总后向散射", "fig13_LayeredBeta.csv"),
+                ("总消光", "fig14_LayeredAlpha.csv"),
+            ]:
+                async def _dl_csv(_name=export_name) -> None:
+                    data = _build_csv_bytes(_name, _DATA_DIR())
+                    if data is not None:
+                        await _native_save(data, _name, [("CSV file", "*.csv")])
+                    else:
+                        ui.notify("数据文件不存在，请先重算", type="warning")
+                ui.button(f"↓ {label}", on_click=_dl_csv).props(
+                    "dense flat"
+                ).classes("text-sm font-mono text-green-700")
+
+        with ui.row().classes("items-center gap-3 flex-wrap pt-1"):
+            ui.label("图像下载：").classes("text-sm text-gray-500 font-medium")
+            for label, slug in [
+                ("回波", "fig12_layered_atmosphere_power"),
+                ("后向散射", "fig13_layered_atmosphere_beta_profile"),
+                ("消光", "fig14_layered_atmosphere_alpha_profile"),
+            ]:
+                async def _dl_png(_slug=slug) -> None:
+                    p = _FIGURES() / f"{_slug}.png"
+                    if p.exists():
+                        await _native_save(p.read_bytes(), f"{_slug}.png", [("PNG image", "*.png")])
+                    else:
+                        ui.notify("图像文件不存在，请先重算", type="warning")
+                async def _dl_svg(_slug=slug) -> None:
+                    p = _FIGURES() / f"{_slug}.svg"
+                    if p.exists():
+                        await _native_save(p.read_bytes(), f"{_slug}.svg", [("SVG image", "*.svg")])
+                    else:
+                        ui.notify("图像文件不存在，请先重算", type="warning")
+                with ui.row().classes("gap-1 items-center"):
+                    ui.label(label).classes("text-sm text-gray-500")
+                    ui.button("PNG", on_click=_dl_png).props("dense flat").classes("text-sm text-blue-600")
+                    ui.button("SVG", on_click=_dl_svg).props("dense flat").classes("text-sm text-blue-600")
 
 
 # ---------------------------------------------------------------------------
@@ -870,6 +1055,8 @@ _SCENE_LABELS = {
 
 _FIELD_LABELS = {
     "wavelength_nm": "波长",
+    "range_max_m": "最大探测距离",
+    "range_step_m": "距离步长",
     "laser_peak_power_W": "峰值功率",
     "pulse_width_s": "脉宽",
     "receiver_radius_m": "接收半径",
@@ -886,11 +1073,16 @@ _FIELD_LABELS = {
     "enabled": "启用噪声",
     "quantum_efficiency": "量子效率",
     "background_power_W": "背景光功率",
-    "dark_current_A": "暗电流",
-    "read_noise_e": "读出噪声",
     "average_pulses": "平均脉冲数",
     "generate_noisy_curve": "带噪曲线",
     "random_seed": "随机种子",
+    "mode": "大气模式",
+    "aerosol_boundary_beta0_m_inv_sr": "近地散射强度",
+    "aerosol_boundary_scale_height_m": "近地衰减高度",
+    "aerosol_layer_beta0_m_inv_sr": "高空层强度",
+    "aerosol_layer_center_m": "高空层中心",
+    "aerosol_layer_width_m": "高空层厚度",
+    "aerosol_lidar_ratio_sr": "气溶胶激光雷达比",
 }
 
 
@@ -907,6 +1099,8 @@ def _impact_scope_text(key: tuple) -> str:
         field = key[1]
         if field in {"laser_peak_power_W", "pulse_width_s", "receiver_radius_m", "optical_efficiency"}:
             return "影响：仅输出重建"
+        if field in {"range_max_m", "range_step_m"}:
+            return "影响：仅输出重建与距离坐标"
         if field == "wavelength_nm":
             return "影响：雾/霾/雨光学与高耗时散射"
         if field == "alpha_mol":
@@ -923,6 +1117,8 @@ def _impact_scope_text(key: tuple) -> str:
         return "影响：霾光学、Mueller 与高耗时散射"
     elif key[0] == "noise":
         return "影响：噪声底与 SNR"
+    elif key[0] == "profile":
+        return "影响：分层大气剖面与新回波曲线"
     return ""
 
 
@@ -962,6 +1158,8 @@ def _state_key_label(key: tuple) -> str:
         return f"{_SCENE_LABELS.get(scenario, scenario)} / {mode_name} / {_FIELD_LABELS.get(field, field)}"
     if section == "noise":
         return f"噪声 / {_FIELD_LABELS.get(key[1], str(key[1]))}"
+    if section == "profile":
+        return f"分层大气 / {_FIELD_LABELS.get(key[1], str(key[1]))}"
     return " / ".join(str(part) for part in key)
 
 
@@ -972,8 +1170,12 @@ def _num(label: str, value: float, state_key: tuple, *,
     if isinstance(value, (int, float)):
         display_value = float(value)
     with ui.column().classes("w-full gap-0"):
-        with ui.row().classes("items-baseline gap-1 w-full"):
-            ui.html(f"<span class='text-sm text-gray-500 w-28 shrink-0'>{label}</span>")
+        with ui.row().classes("items-baseline gap-1 w-full").style("overflow:hidden"):
+            ui.html(
+                f"<span style='display:inline-block;width:112px;min-width:112px;"
+                f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                f"font-size:0.875rem;color:#6b7280;flex-shrink:0'>{label}</span>"
+            )
             inp = ui.number(value=display_value, format=fmt, step=step or 0).classes(
                 "text-sm font-mono flex-1"
             ).props("dense outlined hide-bottom-space")
@@ -984,13 +1186,40 @@ def _num(label: str, value: float, state_key: tuple, *,
 
 
 def _switch(label: str, value: bool, state_key: tuple) -> None:
-    with ui.row().classes("items-center justify-between w-full"):
-        ui.html(f"<span class='text-sm text-gray-500'>{label}</span>")
+    with ui.row().classes("items-center justify-between w-full").style("overflow:hidden"):
+        ui.html(
+            f"<span style='display:inline-block;flex:1;min-width:0;"
+            f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+            f"font-size:0.875rem;color:#6b7280'>{label}</span>"
+        )
         inp = ui.switch(value=bool(value)).props("dense")
     impact_label = ui.label("").classes("text-[11px] text-gray-400 pl-28 hidden")
     _inputs[state_key] = inp
     _input_impact_labels[state_key] = impact_label
     inp.on_value_change(lambda _e: _trigger_plan_refresh())
+
+
+def _choice(label: str, value: str, state_key: tuple, options: dict[str, str]) -> None:
+    with ui.column().classes("w-full gap-0"):
+        with ui.row().classes("items-baseline gap-1 w-full").style("overflow:hidden"):
+            ui.html(
+                f"<span style='display:inline-block;width:112px;min-width:112px;"
+                f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                f"font-size:0.875rem;color:#6b7280;flex-shrink:0'>{label}</span>"
+            )
+            inp = ui.select(options=options, value=value).classes(
+                "text-sm flex-1"
+            ).props("dense outlined options-dense")
+        impact_label = ui.label("").classes("text-[11px] text-gray-400 pl-28 hidden")
+    _inputs[state_key] = inp
+    _input_impact_labels[state_key] = impact_label
+    def _on_change(_e) -> None:
+        if state_key == ("profile", "mode") and str(inp.value) == "ideal_layered":
+            range_max_inp = _inputs.get(("cli", "range_max_m"))
+            if range_max_inp is not None and range_max_inp.value is not None and float(range_max_inp.value) <= 2000.0:
+                range_max_inp.value = 40000.0
+        _trigger_plan_refresh()
+    inp.on_value_change(_on_change)
 
 
 def _build_instrument_editor(g: dict) -> None:
@@ -1006,6 +1235,8 @@ def _build_instrument_editor(g: dict) -> None:
 
 
 def _build_global_editor(g: dict) -> None:
+    _num("R<sub>max</sub> (m)", g.get("range_max_m", 2000.0), ("cli", "range_max_m"), fmt="%.0f")
+    _num("ΔR  (m)", g.get("range_step_m", 1.0), ("cli", "range_step_m"), fmt="%.3f")
     _num("α<sub>mol</sub> (m⁻¹)", g.get("alpha_mol_m_inv", 1.6e-7),                ("cli", "alpha_mol"), fmt="%.3e")
     _num("β<sub>mol</sub> 输入 (m⁻¹sr⁻¹)", _beta_mol_input_from_global(g) or 1.9e-8,
          ("cli", "beta_mol"), fmt="%.3e")
@@ -1015,14 +1246,32 @@ def _build_global_editor(g: dict) -> None:
 
 def _build_noise_editor(g: dict) -> None:
     noise = g.get("noise_model", {})
-    _switch("启用噪声模型", noise.get("enabled", True), ("noise", "enabled"))
-    _num("量子效率 ηq", noise.get("quantum_efficiency", 0.6), ("noise", "quantum_efficiency"), fmt="%.4f")
-    _num("背景光功率 (W)", noise.get("background_power_W", 1.0e-12), ("noise", "background_power_W"), fmt="%.3e")
-    _num("暗电流 (A)", noise.get("dark_current_A", 1.0e-9), ("noise", "dark_current_A"), fmt="%.3e")
-    _num("读出噪声 (e⁻)", noise.get("read_noise_e", 10.0), ("noise", "read_noise_e"), fmt="%.3g")
-    _num("平均脉冲数", noise.get("average_pulses", 1000), ("noise", "average_pulses"), fmt="%.0f")
-    _switch("生成带噪曲线", noise.get("generate_noisy_curve", False), ("noise", "generate_noisy_curve"))
-    _num("随机种子", noise.get("random_seed", 202606) or 0, ("noise", "random_seed"), fmt="%.0f")
+    _switch("启用噪声", noise.get("enabled", True), ("noise", "enabled"))
+    _num("η<sub>q</sub>",              noise.get("quantum_efficiency", 0.6),    ("noise", "quantum_efficiency"), fmt="%.4f")
+    _num("P<sub>bg</sub>  (W)",        noise.get("background_power_W", 1.0e-12),("noise", "background_power_W"), fmt="%.3e")
+    _num("N<sub>avg</sub>",            noise.get("average_pulses", 1000),        ("noise", "average_pulses"),     fmt="%.0f")
+    _switch("生成带噪曲线",             noise.get("generate_noisy_curve", False), ("noise", "generate_noisy_curve"))
+    _num("seed",                       noise.get("random_seed", 202606) or 0,   ("noise", "random_seed"),        fmt="%.0f")
+
+
+def _build_profile_editor(g: dict) -> None:
+    profile = g.get("atmosphere_profile_model", {}) if isinstance(g, dict) else {}
+    mode = str(profile.get("mode", "uniform") or "uniform")
+    _choice(
+        "大气模式",
+        mode,
+        ("profile", "mode"),
+        {
+            "uniform": "均匀大气",
+            "ideal_layered": "分层大气",
+        },
+    )
+    _num("β<sub>a0,bnd</sub>  (m⁻¹sr⁻¹)", profile.get("aerosol_boundary_beta0_m_inv_sr", 2.47e-6), ("profile", "aerosol_boundary_beta0_m_inv_sr"), fmt="%.3e")
+    _num("H<sub>bnd</sub>  (m)",            profile.get("aerosol_boundary_scale_height_m", 2000.0),  ("profile", "aerosol_boundary_scale_height_m"), fmt="%.1f")
+    _num("β<sub>a0,lyr</sub>  (m⁻¹sr⁻¹)", profile.get("aerosol_layer_beta0_m_inv_sr", 5.13e-9),    ("profile", "aerosol_layer_beta0_m_inv_sr"),    fmt="%.3e")
+    _num("z<sub>lyr</sub>  (m)",            profile.get("aerosol_layer_center_m", 20000.0),          ("profile", "aerosol_layer_center_m"),          fmt="%.1f")
+    _num("Δz<sub>lyr</sub>  (m)",           profile.get("aerosol_layer_width_m", 6000.0),            ("profile", "aerosol_layer_width_m"),           fmt="%.1f")
+    _num("S<sub>a</sub>  (sr)",             profile.get("aerosol_lidar_ratio_sr", 50.0),             ("profile", "aerosol_lidar_ratio_sr"),          fmt="%.3f")
 
 
 def _build_fog_editor(key: str, spec: dict) -> None:
@@ -1057,6 +1306,7 @@ def _collect_overrides() -> dict:
     rain: dict[str, dict] = {}
     cli: dict[str, float] = {}
     noise: dict[str, object] = {}
+    profile: dict[str, object] = {}
 
     for key, inp in _inputs.items():
         val = inp.value
@@ -1077,6 +1327,10 @@ def _collect_overrides() -> dict:
                 cli["molecular-depol-ratio"] = float(val)
             elif field == "wavelength_nm":
                 cli["wavelength-nm"] = float(val)
+            elif field == "range_max_m":
+                cli["range-max-m"] = float(val)
+            elif field == "range_step_m":
+                cli["range-step-m"] = float(val)
             elif field == "alpha_mol":
                 cli["alpha-mol"] = float(val)
             elif field == "beta_mol":
@@ -1089,6 +1343,12 @@ def _collect_overrides() -> dict:
                 noise[field] = int(float(val))
             else:
                 noise[field] = float(val)
+        elif key[0] == "profile":
+            _, field = key
+            if field == "mode":
+                profile["mode"] = str(val)
+            else:
+                profile[field] = float(val)
     # system_constant from instrument params
     p0   = _inputs.get(("cli", "laser_peak_power_W"))
     tau  = _inputs.get(("cli", "pulse_width_s"))
@@ -1111,7 +1371,7 @@ def _collect_overrides() -> dict:
     if noise:
         instrument["receiver_noise"] = noise
 
-    return {"fog": fog, "haze": haze, "rain": rain, "cli": cli, "instrument": instrument}
+    return {"fog": fog, "haze": haze, "rain": rain, "cli": cli, "instrument": instrument, "profile": profile}
 
 
 # ---------------------------------------------------------------------------
@@ -1143,9 +1403,16 @@ def _compute_current_identity(precision: str) -> dict | None:
         haze_key = cache_keys.haze_cache_key(haze_specs, args)
         mueller_key = cache_keys.haze_mueller_key(haze_specs, args)
         rain_key = cache_keys.rain_cache_key(rain_specs, args)
-        instr_hash = cache_keys.instrument_hash(overrides.get("instrument", {}))
+        instrument_for_hash = dict(overrides.get("instrument", {}))
+        cli_overrides = overrides.get("cli", {})
+        if "range-max-m" in cli_overrides:
+            instrument_for_hash["range_max_m"] = cli_overrides["range-max-m"]
+        if "range-step-m" in cli_overrides:
+            instrument_for_hash["range_step_m"] = cli_overrides["range-step-m"]
+        instr_hash = cache_keys.instrument_hash(instrument_for_hash)
         noise_hash = cache_keys.noise_hash_from_overrides(overrides)
-        identity = cache_keys.compose_run_identity(fog_key, haze_key, mueller_key, rain_key, instr_hash, noise_hash)
+        profile_hash = cache_keys.profile_hash_from_overrides(overrides)
+        identity = cache_keys.compose_run_identity(fog_key, haze_key, mueller_key, rain_key, instr_hash, noise_hash, profile_hash)
         return {
             "fog_key": fog_key,
             "haze_key": haze_key,
@@ -1153,6 +1420,7 @@ def _compute_current_identity(precision: str) -> dict | None:
             "rain_key": rain_key,
             "instrument_hash": instr_hash,
             "noise_hash": noise_hash,
+            "profile_hash": profile_hash,
             "identity": identity,
             "precision_profile": precision,
         }
@@ -1209,7 +1477,7 @@ def _refresh_field_impact_hints(summary: dict | None = None) -> None:
         if label is None:
             continue
         ref = _reference_value_for_key(current_summary, key)
-        changed = ref is not None and inp.value is not None and not _close(inp.value, ref)
+        changed = ref is not None and inp.value is not None and not _value_equal(key, inp.value, ref)
         if changed:
             label.text = _impact_scope_text(key)
             label.classes(remove="hidden")
@@ -1224,6 +1492,8 @@ def _format_override_value(key: tuple, value) -> str:
     if isinstance(value, (int, float)):
         if key[0] == "cli" and key[1] == "wavelength_nm":
             return f"{_compact_num(value)} nm"
+        if key[0] == "cli" and key[1] in {"range_max_m", "range_step_m"}:
+            return f"{_compact_num(value)} m"
         if key[0] == "cli" and key[1] == "pulse_width_s":
             return f"{_compact_num(value)} s"
         if key[0] == "cli" and key[1] == "receiver_radius_m":
@@ -1242,6 +1512,12 @@ def _format_override_value(key: tuple, value) -> str:
             if key[1] == "average_pulses":
                 return f"{int(float(value))}"
             return _compact_num(value)
+        if key[0] == "profile":
+            if key[1] == "mode":
+                return "分层大气" if str(value) == "ideal_layered" else "均匀大气"
+            if key[1] in {"aerosol_boundary_scale_height_m", "aerosol_layer_center_m", "aerosol_layer_width_m"}:
+                return f"{_compact_num(value)} m"
+            return _compact_num(value)
         return _compact_num(value)
     return str(value)
 
@@ -1255,6 +1531,10 @@ def _reference_value_for_key(summary: dict, key: tuple):
             return inst.get(field)
         if field == "wavelength_nm":
             return g.get("wavelength_nm")
+        if field == "range_max_m":
+            return g.get("range_max_m")
+        if field == "range_step_m":
+            return g.get("range_step_m")
         if field == "alpha_mol":
             return g.get("alpha_mol_m_inv")
         if field == "beta_mol":
@@ -1267,6 +1547,9 @@ def _reference_value_for_key(summary: dict, key: tuple):
         if field == "random_seed":
             return noise.get(field, 202606)
         return noise.get(field)
+    if key[0] == "profile":
+        _, field = key
+        return g.get("atmosphere_profile_model", {}).get(field)
     if key[0] == "fog":
         _, scenario, field = key
         return summary.get("fog", {}).get(scenario, {}).get("spec", {}).get(field)
@@ -1291,7 +1574,7 @@ def _summarize_changes(summary: dict, *, limit: int = 8) -> tuple[list[str], int
         ref = _reference_value_for_key(summary, key)
         if ref is None:
             continue
-        if _close(inp.value, ref):
+        if _value_equal(key, inp.value, ref):
             continue
         total += 1
         if len(lines) < limit:
@@ -1361,12 +1644,19 @@ def _infer_history_precision(run_id: str) -> str | None:
 
 _INSTRUMENT_KEYS = frozenset([
     "laser_peak_power_W", "pulse_width_s", "receiver_radius_m", "optical_efficiency",
+    "range_max_m", "range_step_m",
 ])
 
 
 def _close(a, b) -> bool:
     a, b = float(a), float(b)
     return abs(a - b) <= 1e-9 * max(abs(b), 1e-30) + 1e-30
+
+
+def _value_equal(key: tuple, a, b) -> bool:
+    if key[0] == "profile" and len(key) > 1 and key[1] == "mode":
+        return str(a) == str(b)
+    return _close(a, b)
 
 
 def _detect_changes() -> tuple[bool, bool]:
@@ -1390,36 +1680,37 @@ def _detect_changes() -> tuple[bool, bool]:
     for key, inp in _inputs.items():
         if inp.value is None:
             continue
-        val = float(inp.value)
+        val = inp.value
 
         if key[0] == "cli":
             _, field = key
+            val_num = float(val)
             if field in _INSTRUMENT_KEYS:
                 ref = inst.get(field)
-                if ref is None or not _close(val, ref):
+                if ref is None or not _close(val_num, ref):
                     instrument_changed = True
             elif field == "wavelength_nm":
                 ref = g.get("wavelength_nm")
-                if ref is None or not _close(val, ref):
+                if ref is None or not _close(val_num, ref):
                     physics_changed = True
             elif field == "alpha_mol":
                 ref = g.get("alpha_mol_m_inv")
-                if ref is None or not _close(val, ref):
+                if ref is None or not _close(val_num, ref):
                     physics_changed = True
             elif field == "beta_mol":
                 ref = _beta_mol_input_from_global(g)
-                if ref is None or not _close(val, ref):
+                if ref is None or not _close(val_num, ref):
                     physics_changed = True
             elif field == "molecular-depol-ratio":
                 ref = g.get("molecular_depolarization_ratio")
-                if ref is None or not _close(val, ref):
+                if ref is None or not _close(val_num, ref):
                     physics_changed = True
 
         elif key[0] == "fog":
             _, scenario, field = key
             spec = summary.get("fog", {}).get(scenario, {}).get("spec", {})
             ref = spec.get(field)
-            if ref is None or not _close(val, ref):
+            if ref is None or not _close(float(val), ref):
                 physics_changed = True
 
         elif key[0] == "noise":
@@ -1429,8 +1720,18 @@ def _detect_changes() -> tuple[bool, bool]:
             if field in {"enabled", "generate_noisy_curve"}:
                 if ref is None or bool(inp.value) != bool(ref):
                     instrument_changed = True
-            elif ref is None or not _close(val, ref):
+            elif ref is None or not _close(float(val), ref):
                 instrument_changed = True
+
+        elif key[0] == "profile":
+            _, field = key
+            profile = g.get("atmosphere_profile_model", {})
+            ref = profile.get(field)
+            if field == "mode":
+                if str(val) != str(ref or "uniform"):
+                    physics_changed = True
+            elif ref is None or not _close(float(val), ref):
+                physics_changed = True
 
         elif key[0] == "haze":
             _, scenario, mode_name, field = key
@@ -1440,14 +1741,14 @@ def _detect_changes() -> tuple[bool, bool]:
                 if m.get("name") == mode_name:
                     ref = m.get(field)
                     break
-            if ref is None or not _close(val, ref):
+            if ref is None or not _close(float(val), ref):
                 physics_changed = True
 
         elif key[0] == "rain":
             _, scenario, field = key
             spec = summary.get("rain", {}).get(scenario, {}).get("spec", {})
             ref = spec.get(field)
-            if ref is None or not _close(val, ref):
+            if ref is None or not _close(float(val), ref):
                 physics_changed = True
 
     _diag_event(
@@ -1924,6 +2225,8 @@ _DEFAULTS: dict = {
     "receiver_radius_m":    0.05,
     "optical_efficiency":   0.8,
     "wavelength_nm":        1550.0,
+    "range_max_m":          2000.0,
+    "range_step_m":         1.0,
     "alpha_mol":            1.6e-7,
     "beta_mol":             1.9e-8,
     "molecular-depol-ratio": 0.00365,
@@ -1961,11 +2264,18 @@ _DEFAULTS: dict = {
         "enabled": True,
         "quantum_efficiency": 0.6,
         "background_power_W": 1.0e-12,
-        "dark_current_A": 1.0e-9,
-        "read_noise_e": 10.0,
         "average_pulses": 1000,
         "generate_noisy_curve": False,
         "random_seed": 202606,
+    },
+    "profile": {
+        "mode": "uniform",
+        "aerosol_boundary_beta0_m_inv_sr": 2.47e-6,
+        "aerosol_boundary_scale_height_m": 2000.0,
+        "aerosol_layer_beta0_m_inv_sr": 5.13e-9,
+        "aerosol_layer_center_m": 20000.0,
+        "aerosol_layer_width_m": 6000.0,
+        "aerosol_lidar_ratio_sr": 50.0,
     },
 }
 
@@ -2002,6 +2312,11 @@ def _reset_to_defaults(refresh_callbacks: list | None = None) -> None:
             elif key[0] == "noise":
                 _, field = key
                 val = _DEFAULTS["noise"].get(field)
+                if val is not None:
+                    inp.value = val
+            elif key[0] == "profile":
+                _, field = key
+                val = _DEFAULTS["profile"].get(field)
                 if val is not None:
                     inp.value = val
         _trigger_plan_refresh()
@@ -2080,6 +2395,12 @@ def _populate_inputs_from_summary(summary: dict) -> None:
             elif field == "wavelength_nm":
                 v = g.get("wavelength_nm")
                 if v is not None: inp.value = v
+            elif field == "range_max_m":
+                v = g.get("range_max_m")
+                if v is not None: inp.value = v
+            elif field == "range_step_m":
+                v = g.get("range_step_m")
+                if v is not None: inp.value = v
             elif field == "alpha_mol":
                 v = g.get("alpha_mol_m_inv")
                 if v is not None: inp.value = v
@@ -2096,6 +2417,13 @@ def _populate_inputs_from_summary(summary: dict) -> None:
                 inp.value = noise[field]
             elif field in _DEFAULTS["noise"]:
                 inp.value = _DEFAULTS["noise"][field]
+        elif key[0] == "profile":
+            _, field = key
+            profile = g.get("atmosphere_profile_model", {})
+            if field in profile:
+                inp.value = profile[field]
+            elif field in _DEFAULTS["profile"]:
+                inp.value = _DEFAULTS["profile"][field]
 
 
 # ---------------------------------------------------------------------------
@@ -2262,6 +2590,10 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
             ui.label("修改后点击「重算」生效").classes("text-xs text-amber-600 italic mb-1")
             _build_global_editor(g)
 
+        with ui.expansion("分层大气", icon="layers").classes("w-full"):
+            ui.label("分层模式会额外生成剖面与分层回波图").classes("text-xs text-amber-600 italic mb-1")
+            _build_profile_editor(g)
+
         # ── 场景参数（逐条展开，可编辑） ───────────────────────────────────
         FOG_SCENARIOS  = [("radiation_fog","辐射雾"), ("advection_fog","平流雾")]
         HAZE_SCENARIOS = [("urban_industrial_haze","城市/工业型霾"),
@@ -2292,10 +2624,13 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                             ui.label(label).classes("font-semibold text-sm")
 
                         if cat == "fog":
-                            if spec:
-                                _build_fog_editor(key, spec)
+                            fog_spec = spec if spec else _DEFAULTS["fog"].get(key, {})
+                            _build_fog_editor(key, fog_spec)
                         elif cat == "haze":
                             spec_modes = spec.get("modes", [])
+                            if not spec_modes:
+                                haze_defaults = _DEFAULTS["haze"].get(key, {})
+                                spec_modes = [{"name": mode_name, **vals} for mode_name, vals in haze_defaults.items()]
                             for mode in spec_modes:
                                 mode_name = mode.get("name", "?")
                                 tmatrix_tag = "  [T-matrix]" if mode.get("use_tmatrix") else ""
@@ -2304,8 +2639,8 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                                 )
                                 _build_haze_mode_editor(key, mode_name, mode)
                         elif cat == "rain":
-                            if spec:
-                                _build_rain_editor(key, spec)
+                            rain_spec = spec if spec else _DEFAULTS["rain"].get(key, {})
+                            _build_rain_editor(key, rain_spec)
 
         # ── 重算控制区 ────────────────────────────────────────────────────
         ui.separator()
@@ -2323,9 +2658,9 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                 label="计算精度",
             ).props("dense outlined").classes("w-full text-xs")
 
-            with ui.column().classes("w-full gap-1 px-2 py-2 rounded bg-gray-50 border border-gray-100"):
-                plan_headline_label = ui.label("…").classes("text-xs text-gray-500")
-                plan_summary_column = ui.column().classes("w-full gap-0")
+            with ui.column().classes("w-full gap-1 px-2 py-2 rounded bg-gray-50 border border-gray-100").style("overflow:hidden; min-width:0"):
+                plan_headline_label = ui.label("…").classes("text-xs text-gray-500").style("overflow:hidden; white-space:nowrap; text-overflow:ellipsis; min-width:0")
+                plan_summary_column = ui.column().classes("w-full gap-0").style("overflow:hidden; min-width:0")
 
             def _refresh_identity_status() -> None:
                 """根据当前 UI 输入 + precision 重新评估缓存执行计划并刷新展示。"""
@@ -2348,7 +2683,9 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                     plan_summary_column.clear()
                     with plan_summary_column:
                         for line in list(plan.get("summary_lines") or [])[:3]:
-                            ui.label(str(line)).classes("text-[11px] text-gray-600")
+                            ui.label(str(line)).classes("text-[11px] text-gray-600").style(
+                                "overflow:hidden; white-space:nowrap; text-overflow:ellipsis; min-width:0"
+                            )
                 except Exception:
                     pass
                 _refresh_field_impact_hints()
@@ -2504,6 +2841,7 @@ def _apply_params_json(params: dict, summary: dict) -> None:
     haze = params.get("haze", {})
     rain = params.get("rain", {})
     cli  = params.get("cli", {})
+    profile = params.get("profile", {})
     saved_instrument = params.get("instrument", {})
     noise_params = saved_instrument.get("receiver_noise", params.get("noise", {})) if isinstance(saved_instrument, dict) else params.get("noise", {})
 
@@ -2555,6 +2893,10 @@ def _apply_params_json(params: dict, summary: dict) -> None:
                 inp.value = saved.get("optical_efficiency", inst.get("optical_efficiency", 0.8))
             elif field == "wavelength_nm":
                 inp.value = g.get("wavelength_nm", 1550.0)
+            elif field == "range_max_m":
+                inp.value = g.get("range_max_m", 2000.0)
+            elif field == "range_step_m":
+                inp.value = g.get("range_step_m", 1.0)
             elif field == "alpha_mol":
                 inp.value = g.get("alpha_mol_m_inv", 1.6e-7)
             elif field == "beta_mol":
@@ -2565,6 +2907,8 @@ def _apply_params_json(params: dict, summary: dict) -> None:
             # Map underscore field names back to hyphen keys used in cli dict.
             _field_to_cli_key = {
                 "wavelength_nm":       "wavelength-nm",
+                "range_max_m":         "range-max-m",
+                "range_step_m":        "range-step-m",
                 "alpha_mol":           "alpha-mol",
                 "beta_mol":            "beta-mol",
                 "molecular-depol-ratio": "molecular-depol-ratio",
@@ -2584,6 +2928,15 @@ def _apply_params_json(params: dict, summary: dict) -> None:
                 inp.value = noise_summary[field]
             elif field in _DEFAULTS["noise"]:
                 inp.value = _DEFAULTS["noise"][field]
+        elif key[0] == "profile":
+            _, field = key
+            profile_summary = summary.get("global", {}).get("atmosphere_profile_model", {})
+            if field in profile:
+                inp.value = profile[field]
+            elif field in profile_summary:
+                inp.value = profile_summary[field]
+            elif field in _DEFAULTS["profile"]:
+                inp.value = _DEFAULTS["profile"][field]
 
 
 # ---------------------------------------------------------------------------
@@ -2669,7 +3022,7 @@ def index() -> None:
         with ui.scroll_area().style(
             "width:300px; min-width:260px; max-width:340px;"
             "height:100%; background:#fff;"
-            "border-right:1px solid #e2e8f0;"
+            "border-right:1px solid #e2e8f0; flex-shrink:0;"
         ).classes("px-3 py-3"):
             build_left_panel(summary, chart_refresh_callbacks)
             _diag_event("left_panel_built", timeline=_STARTUP_TIMELINE)
@@ -2696,7 +3049,7 @@ def index() -> None:
 
         # right scroll area  — build charts and register refresh callbacks
         with ui.scroll_area().classes("flex-1 px-5 py-4").style(
-            "height:100%; background:#f1f5f9"
+            "height:100%; background:#f1f5f9; min-width:0"
         ):
             _build_right_panel_with_refresh(summary, chart_refresh_callbacks)
             _diag_event("right_panel_built", timeline=_STARTUP_TIMELINE)
@@ -2724,6 +3077,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
         t_haze  = ui.tab("霾 · 功率",   icon="blur_on")
         t_depol = ui.tab("霾 · 退偏",   icon="tune")
         t_rain  = ui.tab("雨 · 功率",   icon="grain")
+        t_layered = ui.tab("分层大气", icon="layers")
         t_snr   = ui.tab("信噪比",      icon="show_chart")
         t_all   = ui.tab("全场景对比",   icon="compare_arrows")
 
@@ -2733,6 +3087,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
         t_haze: "霾 · 功率",
         t_depol: "霾 · 退偏",
         t_rain: "雨 · 功率",
+        t_layered: "分层大气",
         t_snr: "信噪比",
         t_all: "全场景对比",
     }
@@ -2753,6 +3108,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
             "霾 · 功率": t_haze,
             "霾 · 退偏": t_depol,
             "雨 · 功率": t_rain,
+            "分层大气": t_layered,
             "信噪比": t_snr,
             "全场景对比": t_all,
         }
@@ -2830,10 +3186,13 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                 callbacks=callbacks,
             )
 
+        with ui.tab_panel(t_layered):
+            layered_tab(callbacks)
+
         with ui.tab_panel(t_snr):
             with ui.card().classes("w-full p-4 shadow-none border"):
                 ui.label("全场景信噪比 SNR").classes("font-semibold text-sm text-gray-700 mb-2")
-                snr_plotly = ui.plotly(fig_all_snr()).classes("w-full")
+                snr_plotly = ui.plotly(fig_all_snr()).classes("w-full").style("min-height:420px; overflow:hidden")
 
             with ui.expansion("SNR 数值摘要", icon="table_chart", value=True).classes("w-full"):
                 ui.label("雾").classes("text-xs font-semibold text-gray-500 mt-1")
@@ -2887,7 +3246,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                     ui.label("全场景回波功率对比").classes("font-semibold text-sm text-gray-700")
                     ui.space()
                     sc_tog = ui.toggle({"log":"对数","lin":"线性"}, value="log").props("dense").classes("text-xs")
-                pwr_plotly = ui.plotly(fig_all_power(True)).classes("w-full")
+                pwr_plotly = ui.plotly(fig_all_power(True)).classes("w-full").style("min-height:420px; overflow:hidden")
 
                 def _on_all_scale(e) -> None:
                     log_state_all[0] = (e.value == "log")
@@ -2896,7 +3255,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
 
             with ui.card().classes("w-full p-4 shadow-none border"):
                 ui.label("全场景退偏比对比").classes("font-semibold text-sm text-gray-700 mb-2")
-                depol_plotly = ui.plotly(fig_all_depol()).classes("w-full")
+                depol_plotly = ui.plotly(fig_all_depol()).classes("w-full").style("min-height:420px; overflow:hidden")
 
             def redraw_all_power() -> None:
                 pwr_plotly.update_figure(fig_all_power(log_state_all[0]))
