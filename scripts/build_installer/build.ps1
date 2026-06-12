@@ -23,8 +23,9 @@
 #>
 param(
     [string]$AppVersion = "1.0",
-    [string]$PackagedHistoryRunId = "run_20260612_193512",
-    [string]$PackagedHistoryDisplayName = "分层大气测试用例",
+    # 打包携带的历史记录列表（逗号分隔的 run_id:显示名 对，显示名可省略）
+    # 格式示例: "run_20260612_193512:分层大气测试用例,run_20260611_222851:532nm-30km"
+    [string]$PackagedHistoryEntries = "run_20260612_193512:分层大气测试用例,run_20260611_222851:532nm-30km",
     [switch]$Repack,
     [switch]$CleanBuild
 )
@@ -327,44 +328,64 @@ $historyDist = Join-Path $distDir "run_history"
 $runtimeStateSrc = Join-Path $repoRoot "temp\lidar_1d\runtime_state"
 $runtimeStateDist = Join-Path $distDir "runtime_state"
 
-if (-not [string]::IsNullOrWhiteSpace($PackagedHistoryRunId)) {
+# --------------------------------------------------------------------------
+# 3.7. Copy selected local history/runtime state (local reproducibility assets)
+# --------------------------------------------------------------------------
+Write-Step "复制指定本地历史记录与运行态（如果存在）"
+$historySrc = Join-Path $repoRoot "temp\lidar_1d\run_history"
+$historyDist = Join-Path $distDir "run_history"
+$runtimeStateSrc = Join-Path $repoRoot "temp\lidar_1d\runtime_state"
+$runtimeStateDist = Join-Path $distDir "runtime_state"
+
+if (-not [string]::IsNullOrWhiteSpace($PackagedHistoryEntries)) {
     Assert-Exists $historySrc "请先生成本地历史记录 temp/lidar_1d/run_history/"
     $manifestSrc = Join-Path $historySrc "manifest.json"
     Assert-Exists $manifestSrc "历史记录 manifest 缺失。"
-    $runSrc = Join-Path $historySrc $PackagedHistoryRunId
-    Assert-Exists $runSrc "指定历史 run 不存在：$PackagedHistoryRunId"
-
-    Write-Host "  仅复制指定历史 run: $PackagedHistoryRunId"
-    if (Test-Path $historyDist) {
-        Remove-Item -Path $historyDist -Recurse -Force
-    }
-    New-Item -ItemType Directory -Force -Path $historyDist | Out-Null
-    Copy-Item -Path $runSrc -Destination (Join-Path $historyDist $PackagedHistoryRunId) -Recurse -Force
-
     $manifestData = Get-Content $manifestSrc -Raw | ConvertFrom-Json
-    $selectedRun = @($manifestData.runs) | Where-Object { $_.id -eq $PackagedHistoryRunId } | Select-Object -First 1
-    if (-not $selectedRun) {
-        Write-Error "manifest.json 中找不到指定历史 run: $PackagedHistoryRunId"
-        exit 1
-    }
-    $packagedRun = [ordered]@{
-        id = [string]$selectedRun.id
-        timestamp = [string]$selectedRun.timestamp
-        label = $PackagedHistoryDisplayName
-        display_name = $PackagedHistoryDisplayName
-        precision = [string]$selectedRun.precision
-        origin = [string]$selectedRun.origin
-        summary_sha256 = [string]$selectedRun.summary_sha256
-        cache_identity = $selectedRun.cache_identity
-        name_updated_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
+    if (Test-Path $historyDist) { Remove-Item -Path $historyDist -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $historyDist | Out-Null
+
+    $packagedRuns = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($entry in ($PackagedHistoryEntries -split ',')) {
+        $entry = $entry.Trim()
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+
+        $parts = $entry -split ':', 2
+        $runId = $parts[0].Trim()
+        $displayName = if ($parts.Count -gt 1) { $parts[1].Trim() } else { $runId }
+
+        $runSrc = Join-Path $historySrc $runId
+        Assert-Exists $runSrc "指定历史 run 不存在：$runId"
+
+        Write-Host "  复制历史 run: $runId ($displayName)"
+        Copy-Item -Path $runSrc -Destination (Join-Path $historyDist $runId) -Recurse -Force
+
+        $selectedRun = @($manifestData.runs) | Where-Object { $_.id -eq $runId } | Select-Object -First 1
+        if (-not $selectedRun) {
+            Write-Error "manifest.json 中找不到指定历史 run: $runId"
+            exit 1
+        }
+        $packagedRuns.Add([ordered]@{
+            id               = [string]$selectedRun.id
+            timestamp        = [string]$selectedRun.timestamp
+            label            = $displayName
+            display_name     = $displayName
+            precision        = [string]$selectedRun.precision
+            origin           = [string]$selectedRun.origin
+            summary_sha256   = [string]$selectedRun.summary_sha256
+            cache_identity   = $selectedRun.cache_identity
+            name_updated_at  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        })
     }
 
     $packagedManifest = [ordered]@{
-        runs = @($packagedRun)
+        runs      = $packagedRuns.ToArray()
         active_id = "default"
     }
     Write-JsonFile (Join-Path $historyDist "manifest.json") $packagedManifest
-    Write-Host "  历史记录快照已生成：仅包含 '$PackagedHistoryDisplayName'"
+    Write-Host "  历史记录快照已生成：共 $($packagedRuns.Count) 条记录"
 } else {
     Write-Host "  未指定打包历史 run，跳过历史记录复制"
 }
