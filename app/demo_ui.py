@@ -3480,6 +3480,22 @@ def index() -> None:
 
     ui.query("body").style("margin:0;padding:0;overflow:hidden")
 
+    # ── 布局修正 CSS ──────────────────────────────────────────────────────
+    # 根因：ui.scroll_area 的内容容器 .q-scrollarea__content 默认宽度是 max-content
+    # （由最宽子元素决定，以支持水平滚动）。长存档名会把左面板撑破覆盖右侧；
+    # plotly 固定像素宽会把右面板内容容器撑成 max-content，导致窗口缩小时图表不回缩。
+    # 强制内容容器占满面板宽度后，内部 w-full 元素随面板等比放缩，两个问题同时解决。
+    ui.add_css("""
+        .lidar-left-panel .q-scrollarea__content,
+        .lidar-right-panel .q-scrollarea__content { width: 100%; max-width: 100%; }
+        /* select/input 的 native 元素 min-width:auto 会被长值撑开，归零并省略号 */
+        .lidar-left-panel .q-field__native,
+        .lidar-left-panel .q-field__input { min-width: 0; text-overflow: ellipsis; }
+        /* 长无空格文本（存档名标签）强制换行 */
+        .lidar-left-panel .q-item__label,
+        .lidar-left-panel label { overflow-wrap: anywhere; word-break: break-word; }
+    """)
+
     # ── header ────────────────────────────────────────────────────────────
     with ui.header().classes(
         "bg-slate-800 text-white items-center px-5 py-2 shadow-lg"
@@ -3508,53 +3524,58 @@ def index() -> None:
     # ── chart refresh callbacks (registered after right panel is built) ───
     chart_refresh_callbacks: list = []
 
-    # ── body: left + right ────────────────────────────────────────────────
-    with ui.row().classes("w-full gap-0").style(
-        "height:calc(100vh - 48px); overflow:hidden"
-    ):
-        # left scroll area
-        with ui.scroll_area().style(
-            "width:300px; min-width:260px; max-width:340px;"
-            "height:100%; background:#fff;"
-            "border-right:1px solid #e2e8f0; flex-shrink:0;"
-        ).classes("px-3 py-3"):
-            build_left_panel(summary, chart_refresh_callbacks)
-            _diag_event("left_panel_built", timeline=_STARTUP_TIMELINE)
-            # Restore the active run's exact UI state from params.json so the
-            # startup path is identical to the history-switch path.  Without
-            # this, inputs are populated from summary.json only, which can
-            # differ from params.json (e.g. instrument keys stored differently).
-            _aid = cache_runtime.get_active_view_id()
-            if _aid:
-                _pf = cache_runtime.get_run_paths(_aid)["params"]
-                if _pf.exists():
-                    try:
-                        _apply_params_json(
-                            json.loads(_pf.read_text(encoding="utf-8")), summary
-                        )
-                        _trigger_plan_refresh()
-                        _diag_event(
-                            "params_restored",
-                            timeline=_STARTUP_TIMELINE,
-                            payload={"active_id": _aid, "params_path": str(_pf)},
-                        )
-                    except Exception:
-                        pass
+    # ── body: left + right（可水平拖拽分隔） ──────────────────────────────
+    # ui.splitter 的分隔条可拖拽，用户手动调节左面板宽度即可避免长内容溢出。
+    # value 为左面板占比(%)，limits 限制拖拽范围，避免左面板被拖没或过宽。
+    with ui.splitter(value=20, limits=(12, 45)).classes("w-full").style(
+        "height:calc(100vh - 48px)"
+    ) as body_splitter:
+        body_splitter.props("before-class=overflow-hidden after-class=overflow-hidden")
 
-        # right scroll area  — build charts and register refresh callbacks
-        with ui.scroll_area().classes("flex-1 px-5 py-4").style(
-            "height:100%; background:#f1f5f9; min-width:0"
-        ):
-            _build_right_panel_with_refresh(summary, chart_refresh_callbacks)
-            _diag_event("right_panel_built", timeline=_STARTUP_TIMELINE)
-            _diag_event("ui_ready", timeline=_STARTUP_TIMELINE)
-            _diag_update_gui_summary(
-                {
-                    "active_summary": str(_SUMMARY()),
-                    "history_runs": len(_load_manifest().get("runs", [])),
-                    "log_buffer_lines": len(_log_buf),
-                }
-            )
+        # left panel
+        with body_splitter.before:
+            with ui.scroll_area().style(
+                "height:calc(100vh - 48px); background:#fff;"
+                "border-right:1px solid #e2e8f0;"
+            ).classes("px-3 py-3 lidar-left-panel"):
+                build_left_panel(summary, chart_refresh_callbacks)
+                _diag_event("left_panel_built", timeline=_STARTUP_TIMELINE)
+                # Restore the active run's exact UI state from params.json so the
+                # startup path is identical to the history-switch path.  Without
+                # this, inputs are populated from summary.json only, which can
+                # differ from params.json (e.g. instrument keys stored differently).
+                _aid = cache_runtime.get_active_view_id()
+                if _aid:
+                    _pf = cache_runtime.get_run_paths(_aid)["params"]
+                    if _pf.exists():
+                        try:
+                            _apply_params_json(
+                                json.loads(_pf.read_text(encoding="utf-8")), summary
+                            )
+                            _trigger_plan_refresh()
+                            _diag_event(
+                                "params_restored",
+                                timeline=_STARTUP_TIMELINE,
+                                payload={"active_id": _aid, "params_path": str(_pf)},
+                            )
+                        except Exception:
+                            pass
+
+        # right panel — build charts and register refresh callbacks
+        with body_splitter.after:
+            with ui.scroll_area().classes("px-5 py-4 lidar-right-panel").style(
+                "height:calc(100vh - 48px); background:#f1f5f9;"
+            ):
+                _build_right_panel_with_refresh(summary, chart_refresh_callbacks)
+                _diag_event("right_panel_built", timeline=_STARTUP_TIMELINE)
+                _diag_event("ui_ready", timeline=_STARTUP_TIMELINE)
+                _diag_update_gui_summary(
+                    {
+                        "active_summary": str(_SUMMARY()),
+                        "history_runs": len(_load_manifest().get("runs", [])),
+                        "log_buffer_lines": len(_log_buf),
+                    }
+                )
 
 
 def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
