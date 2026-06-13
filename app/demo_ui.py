@@ -660,6 +660,7 @@ def fig_hial_snr() -> dict:
 
 
 def fig_layered_power(log: bool) -> dict:
+    d = load_csv_display("layered_atmosphere_power.csv")
     traces = []
     if d:
         traces.append(_trace(
