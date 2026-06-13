@@ -46,40 +46,47 @@ from atmosphere_profile import normalize_profile_config                 # noqa: 
 from lidar_profile_solver import solve_power_from_profile               # noqa: E402
 
 # ---------------------------------------------------------------------------
-# 平流层硫酸盐气溶胶典型谱参数
-# 来源：Jager & Deshler (2002) J. Geophys. Res., SAGE II 背景期反演
-# 适用场景：火山平静期平流层背景气溶胶，λ=1550nm 处近透明（m_imag≈0）
+# 高空气溶胶等效谱参数
+#
+# 选型依据：要求与分层大气模型的气溶胶激光雷达比 S=50 sr 严格一致（α、β 同时
+# 零偏差）。分层大气的 S=50 sr 是经验假设值，对应高空吸收性传输层气溶胶
+# （黑碳/烟尘老化层），折射率取 Bond & Bergstrom (2006) 综述的黑碳典型值
+# m≈1.6+0.3i（近红外）。在该折射率与 σ_g=1.6 下，反求中值半径 r_g 使球形
+# Mie 计算的 S 恰为 50.0 sr —— 因此这是一组“等效谱”，r_g 为标定量而非
+# 直接文献值；折射率与谱宽取自文献。详见 REFERENCE_CALIBRATION。
 # ---------------------------------------------------------------------------
 STRAT_AEROSOL = {
-    "rg_um":   0.10,    # 对数正态中值半径
-    "sigma_g": 1.86,    # 几何标准差
-    "m_real":  1.43,    # 折射率实部（硫酸盐溶液，1550nm）
-    "m_imag":  1e-8,    # 折射率虚部（近透明）
-    "r_min_um": 0.02,
-    "r_max_um": 2.0,
+    "rg_um":   0.025640,  # 标定量：使 Mie S=50.0 sr（σ_g、m 固定时唯一确定）
+    "sigma_g": 1.6,       # 几何标准差（黑碳/烟尘老化层典型谱宽）
+    "m_real":  1.6,       # 折射率实部（黑碳，1550nm，Bond & Bergstrom 2006）
+    "m_imag":  0.3,       # 折射率虚部（强吸收）
+    "r_min_um": 0.005,
+    "r_max_um": 0.5,
 }
 
 # ---------------------------------------------------------------------------
 # 文献对齐基准（手动标定，2026-06-13）
-# 取 H=20000m（分层大气高斯峰中心），n0 使 beta_mie = beta_aerosol(H)
-# S_mie=3.61 sr（Mie 真实值），分层大气假设 S=50 sr，差异为预期物理差异
+# 取 H=20000m（分层大气高斯峰中心），等效谱使 Mie 的 S=50.0 sr，
+# 因此在该高度 alpha 与 beta 同时与分层大气解析值零偏差。
 # ---------------------------------------------------------------------------
 REFERENCE_CALIBRATION = {
     "H_m":              20000.0,
-    "n0_cm3":           7.245788e-01,
+    "n0_cm3":           7.776356e+02,
     "beta_target":      5.242138e-09,
     "beta_mie":         5.242138e-09,
-    "alpha_mie":        1.894124e-08,
+    "alpha_mie":        2.621069e-07,
     "alpha_layered":    2.621069e-07,
-    "S_mie_sr":         3.61,
+    "S_mie_sr":         50.0,
     "S_layered_sr":     50.0,
-    "alpha_deviation_pct": 92.8,
+    "alpha_deviation_pct": 0.0,
+    "beta_deviation_pct":  0.0,
     "note": (
-        "beta 严格对齐分层大气模型 H=20000m 处完整解析值（边界层+高空层）；"
-        "alpha 由 Mie 自然给出（S=3.61sr），与分层大气 S=50sr 差异 92.8%，"
-        "反映硫酸盐气溶胶与分层大气经验模型的本征物理差异。"
+        "等效谱标定：σ_g=1.6、m=1.6+0.3i 固定，反求 r_g=0.025640μm 使 Mie 的 "
+        "S=50.0sr，与分层大气经验 S 严格一致；H=20000m 处 n0=777.6 cm^-3 使 "
+        "alpha、beta 同时与分层大气解析值零偏差。r_g 为标定量（非直接文献值），"
+        "折射率与谱宽取自黑碳/烟尘文献。"
     ),
-    "reference": "Jager & Deshler 2002, J. Geophys. Res. 107(D24), 4709",
+    "reference": "Bond & Bergstrom 2006, Aerosol Sci. Technol. 40(1); S=50sr 对齐分层大气经验模型",
 }
 
 # ---------------------------------------------------------------------------
@@ -413,7 +420,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--output",          required=True,  help="输出目录")
     p.add_argument("--height-m",        type=float, default=20000.0, help="气溶胶高度 H (m)")
-    p.add_argument("--n0-cm3",          type=float, default=7.245788e-1,
+    p.add_argument("--n0-cm3",          type=float, default=7.776356e2,
                    help="粒子数密度 n0 (cm^-3)，默认为文献对齐基准值")
     p.add_argument("--range-max-m",     type=float, default=2000.0)
     p.add_argument("--range-step-m",    type=float, default=1.0)

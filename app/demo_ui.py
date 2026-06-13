@@ -1049,7 +1049,7 @@ async def _do_hial_compute(
     overrides = _collect_overrides()
     hial_cfg  = overrides.get("high_altitude_aerosol", {})
     H_m       = float(hial_cfg.get("height_m", 20000.0))
-    n0_cm3    = float(hial_cfg.get("n0_cm3",   7.245788e-1))
+    n0_cm3    = float(hial_cfg.get("n0_cm3",   7.776356e2))
     profile   = overrides.get("profile", {})
     noise_cfg = overrides.get("instrument", {}).get("receiver_noise", {})
     sys_c     = overrides.get("cli", {}).get("system-constant", None)
@@ -1544,17 +1544,17 @@ def _build_profile_editor(g: dict) -> None:
 def _build_highalt_editor(g: dict) -> None:
     hial = g.get("high_altitude_aerosol", {}) if isinstance(g, dict) else {}
     _num("H  (m)",      hial.get("height_m", 20000.0),    ("high_altitude_aerosol", "height_m"),  fmt="%.1f")
-    _num("n₀  (cm⁻³)", hial.get("n0_cm3",   7.245788e-1), ("high_altitude_aerosol", "n0_cm3"),   fmt="%.6e")
+    _num("n₀  (cm⁻³)", hial.get("n0_cm3",   7.776356e2),  ("high_altitude_aerosol", "n0_cm3"),   fmt="%.6e")
     with ui.row().classes("items-start gap-1 mt-1"):
         ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
         ui.label(
-            "谱参数固化：Jager & Deshler 2002 平流层硫酸盐  "
-            "r_g=0.10 μm  σ_g=1.86  m=1.43+1e-8i"
+            "等效谱固化：高空吸收性传输层（黑碳/烟尘）  "
+            "r_g=0.02564 μm  σ_g=1.6  m=1.6+0.3i  → S=50 sr"
         ).classes("text-xs text-gray-400")
     with ui.row().classes("items-start gap-1 mt-1"):
         ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
         ui.label(
-            "文献基准：H=20000m  n₀=7.2458e-01 cm⁻³  → β 与分层大气严格对齐"
+            "文献基准：H=20000m  n₀=7.7764e+02 cm⁻³  → α、β 与分层大气零偏差"
         ).classes("text-xs text-gray-400")
 
 
@@ -2896,7 +2896,7 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
             _build_profile_editor(g)
 
         with ui.expansion("高空低气溶胶浓度", icon="air").classes("w-full"):
-            ui.label("平流层硫酸盐谱（Jager & Deshler 2002），输入高度与数密度").classes("text-xs text-amber-600 italic mb-1")
+            ui.label("高空吸收性传输层等效谱（S=50sr 对齐分层大气），输入高度与数密度").classes("text-xs text-amber-600 italic mb-1")
             _build_highalt_editor(g)
 
         # ── 场景参数（逐条展开，可编辑） ───────────────────────────────────
