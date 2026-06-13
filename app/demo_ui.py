@@ -51,7 +51,9 @@ ROOT       = _get_root()
 _OUTPUTS   = ROOT / "temp" / "lidar_1d" / "outputs_high_precision_latest" / "local"
 DOCS       = ROOT / "temp" / "set"
 OVERRIDES  = ROOT / "temp" / "lidar_1d" / "param_overrides.json"
-MFF_SCRIPT = ROOT / "temp" / "lidar_1d" / "make_final_figures.py"
+MFF_SCRIPT   = ROOT / "temp" / "lidar_1d" / "make_final_figures.py"
+HIAL_SCRIPT  = ROOT / "temp" / "lidar_1d" / "high_altitude_aerosol.py"
+HIAL_OUT_DIR = ROOT / "temp" / "lidar_1d" / "outputs_high_altitude" / "local"
 HISTORY_DIR = cache_runtime.LAYOUT.history_root
 MANIFEST    = cache_runtime.LAYOUT.manifest_path
 _DIAG_SESSION = get_or_create_session("gui")
@@ -585,8 +587,79 @@ def fig_rain_power(log: bool) -> dict:
             "layout": _layout("雨 — 回波功率 P(R)", "P(R)  (W)", log)}
 
 
+_hial_csv_cache: dict[str, dict] = {}
+
+
+def _load_hial_csv(fname: str) -> dict[str, list[float]]:
+    if fname in _hial_csv_cache:
+        return _hial_csv_cache[fname]
+    p = HIAL_OUT_DIR / "data" / fname
+    if not p.exists():
+        return {}
+    try:
+        with p.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            result: dict[str, list[float]] = {}
+            for row in reader:
+                for k, v in row.items():
+                    try:
+                        result.setdefault(k, []).append(float(v))
+                    except (ValueError, TypeError):
+                        pass
+        _hial_csv_cache[fname] = result
+        return result
+    except Exception:
+        return {}
+
+
+def _load_hial_summary() -> dict:
+    p = HIAL_OUT_DIR / "summary.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _invalidate_hial_cache() -> None:
+    _hial_csv_cache.clear()
+
+
+def _downsample(data: dict[str, list[float]], max_pts: int = 2000) -> dict[str, list[float]]:
+    if not data:
+        return data
+    n = len(next(iter(data.values())))
+    if n <= max_pts:
+        return data
+    step = max(1, n // max_pts)
+    return {k: v[::step] for k, v in data.items()}
+
+
+def fig_hial_power(log: bool) -> dict:
+    d = _downsample(_load_hial_csv("high_altitude_aerosol_power.csv"))
+    traces = []
+    if d:
+        y = _power_curve(d, "power_signal_raw", "power_observed_raw")
+        traces.append(_trace(d["range_m"], y, "高空气溶胶", "#7b2d8b"))
+        if d.get("noise_floor_rms_W"):
+            traces.append(_constant_trace(d["range_m"], d["noise_floor_rms_W"][0], "噪声底 RMS", "#666666"))
+    return {"data": traces,
+            "layout": _layout("高空低气溶胶浓度 — 回波功率 P(R)", "P(R)  (W)", log)}
+
+
+def fig_hial_snr() -> dict:
+    d = _downsample(_load_hial_csv("high_altitude_aerosol_power.csv"))
+    traces = []
+    if d and d.get("snr_db"):
+        traces.append(_trace(d["range_m"], d["snr_db"], "高空气溶胶 SNR", "#7b2d8b"))
+        traces.append(_constant_trace(d["range_m"], 10.0, "SNR = 10 dB", "#ff9900", dash="dash"))
+        traces.append(_constant_trace(d["range_m"], 4.77, "SNR = 3 线性", "#cc3333", dash="dot"))
+    return {"data": traces,
+            "layout": _layout("高空低气溶胶浓度 — 信噪比 SNR(R)", "SNR  (dB)", False)}
+
+
 def fig_layered_power(log: bool) -> dict:
-    d = load_csv_display("layered_atmosphere_power.csv")
     traces = []
     if d:
         traces.append(_trace(
@@ -959,6 +1032,197 @@ def chart_tab(
                             ).classes("text-sm font-mono text-green-700")
 
 
+async def _do_hial_compute(
+    status_label,
+    compute_btn,
+    hial_callbacks: list,
+) -> None:
+    global _hial_running, _hial_current_proc
+    if _hial_running:
+        return
+    _hial_running = True
+    _safe_call(compute_btn.disable)
+    _safe_call(status_label.set_text, "计算中…")
+    _safe_call(status_label.classes, remove="text-green-600 text-red-600", add="text-blue-600")
+
+    overrides = _collect_overrides()
+    hial_cfg  = overrides.get("high_altitude_aerosol", {})
+    H_m       = float(hial_cfg.get("height_m", 20000.0))
+    n0_cm3    = float(hial_cfg.get("n0_cm3",   7.245788e-1))
+    profile   = overrides.get("profile", {})
+    noise_cfg = overrides.get("instrument", {}).get("receiver_noise", {})
+    sys_c     = overrides.get("cli", {}).get("system-constant", None)
+
+    from path_resolver import resolve_mie_python_executable
+    mie_python = resolve_mie_python_executable()
+
+    cmd = [
+        mie_python, str(HIAL_SCRIPT),
+        "--output", str(HIAL_OUT_DIR),
+        "--height-m", str(H_m),
+        "--n0-cm3", str(n0_cm3),
+    ]
+    if sys_c is not None:
+        cmd += ["--system-constant", str(sys_c)]
+    if profile:
+        cmd += ["--profile-json", json.dumps(profile)]
+    if noise_cfg:
+        cmd += ["--noise-overrides", json.dumps(noise_cfg)]
+
+    try:
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        kwargs: dict = {"cwd": str(ROOT), "env": env}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            **kwargs,
+        )
+        _hial_current_proc = proc
+        async for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if line:
+                _safe_call(status_label.set_text, line[-80:])
+        await proc.wait()
+        rc = proc.returncode
+    except Exception as exc:
+        _safe_call(status_label.set_text, f"子进程异常: {exc}")
+        _safe_call(status_label.classes, remove="text-blue-600", add="text-red-600")
+        _hial_running = False
+        _safe_call(compute_btn.enable)
+        return
+    finally:
+        _hial_current_proc = None
+
+    if rc == 0:
+        _invalidate_hial_cache()
+        for cb in hial_callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
+        _safe_call(status_label.set_text, f"计算完成  H={H_m:.0f}m  n₀={n0_cm3:.3e} cm⁻³")
+        _safe_call(status_label.classes, remove="text-blue-600 text-red-600", add="text-green-600")
+    else:
+        _safe_call(status_label.set_text, f"计算失败（返回码 {rc}）")
+        _safe_call(status_label.classes, remove="text-blue-600", add="text-red-600")
+
+    _hial_running = False
+    _safe_call(compute_btn.enable)
+
+
+def highalt_tab() -> None:
+    global _hial_callbacks
+    hial_cbs: list = []
+
+    with ui.column().classes("w-full gap-4"):
+        # ── 控制栏 ────────────────────────────────────────────────────────
+        with ui.card().classes("w-full p-3 shadow-none border bg-gray-50"):
+            with ui.row().classes("items-center gap-3 flex-wrap"):
+                compute_btn = ui.button("▶ 计算", icon="play_arrow").props("dense").classes(
+                    "text-sm font-semibold bg-purple-700 text-white"
+                )
+                status_lbl = ui.label("就绪 — 在左侧输入 H 和 n₀ 后点击计算").classes(
+                    "text-xs text-gray-500"
+                )
+            with ui.row().classes("items-start gap-1 mt-1"):
+                ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
+                ui.label(
+                    "均匀层模型：P(R) 与 SNR 的物理意义与分层大气不同，不可直接类比"
+                ).classes("text-xs text-gray-400")
+
+        # ── 功率曲线 ─────────────────────────────────────────────────────
+        log_state = [True]
+        with ui.card().classes("w-full p-4 shadow-none border"):
+            with ui.row().classes("items-center gap-3 mb-2 flex-wrap"):
+                ui.label("回波功率 P(R)").classes("font-semibold text-sm text-gray-700")
+                ui.space()
+                sc_tog = ui.toggle({"log": "对数", "lin": "线性"}, value="log").props("dense").classes("text-xs")
+            power_plot = ui.plotly(fig_hial_power(True)).classes("w-full").style("min-height:380px; overflow:hidden")
+
+            def _on_scale(e) -> None:
+                log_state[0] = (e.value == "log")
+                power_plot.update_figure(fig_hial_power(log_state[0]))
+            sc_tog.on_value_change(_on_scale)
+
+        # ── SNR 曲线 ──────────────────────────────────────────────────────
+        with ui.card().classes("w-full p-4 shadow-none border"):
+            ui.label("信噪比 SNR(R)").classes("font-semibold text-sm text-gray-700 mb-2")
+            snr_plot = ui.plotly(fig_hial_snr()).classes("w-full").style("min-height:320px; overflow:hidden")
+
+        # ── 数值摘要 ──────────────────────────────────────────────────────
+        with ui.expansion("数值摘要", icon="table_chart", value=True).classes("w-full"):
+            summary_container = ui.column().classes("w-full")
+
+            def _render_hial_summary() -> None:
+                summary_container.clear()
+                sm = _load_hial_summary().get("high_altitude_aerosol", {})
+                if not sm:
+                    with summary_container:
+                        ui.label("暂无数据，请先点击「计算」").classes("text-xs text-gray-400 p-2")
+                    return
+                inp   = sm.get("input", {})
+                opt   = sm.get("optical", {})
+                ref   = sm.get("layered_reference", {})
+                snrs  = sm.get("snr_summary", {})
+
+                def _ff(v, d=4):
+                    return f"{v:.{d}e}" if isinstance(v, float) else "—"
+                def _f2(v):
+                    return f"{v:.2f}" if isinstance(v, float) else "—"
+
+                cols = [
+                    {"name": "项目", "label": "项目", "field": "项目", "align": "left"},
+                    {"name": "Mie计算值", "label": "Mie 计算值", "field": "Mie计算值", "align": "right"},
+                    {"name": "分层大气参考", "label": "分层大气 H 处参考", "field": "分层大气参考", "align": "right"},
+                ]
+                rows = [
+                    {"项目": f"H (m)",             "Mie计算值": f"{inp.get('height_m', 0):.0f}",         "分层大气参考": "—"},
+                    {"项目": "n₀ (cm⁻³)",          "Mie计算值": _ff(inp.get("n0_cm3")),                  "分层大气参考": "—"},
+                    {"项目": "α_p (m⁻¹)",          "Mie计算值": _ff(opt.get("alpha_particle")),          "分层大气参考": _ff(ref.get("alpha_aerosol_at_H"))},
+                    {"项目": "β_p (m⁻¹sr⁻¹)",     "Mie计算值": _ff(opt.get("beta_particle")),           "分层大气参考": _ff(ref.get("beta_aerosol_at_H"))},
+                    {"项目": "S = α/β (sr)",       "Mie计算值": _f2(opt.get("S_mie_sr")),               "分层大气参考": f"{ref.get('S_assumed_sr', 50):.0f}"},
+                    {"项目": "β 偏差 (%)",         "Mie计算值": f"{ref.get('beta_deviation_pct', 0):+.2f}%", "分层大气参考": "0%"},
+                    {"项目": "SNR@1km (dB)",        "Mie计算值": _f2(snrs.get("snr_db_at_1000m")),        "分层大气参考": "—"},
+                    {"项目": "SNR@2km (dB)",        "Mie计算值": _f2(snrs.get("snr_db_at_2000m")),        "分层大气参考": "—"},
+                    {"项目": "R(SNR≥10) (m)",       "Mie计算值": f"{snrs.get('max_range_snr_ge_10') or '—'}",  "分层大气参考": "—"},
+                ]
+                with summary_container:
+                    ui.table(columns=cols, rows=rows).classes("w-full text-xs").props("dense flat bordered separator=cell")
+
+            _render_hial_summary()
+
+        # ── CSV 下载 ──────────────────────────────────────────────────────
+        with ui.row().classes("items-center gap-3 flex-wrap pt-1"):
+            ui.label("数据下载：").classes("text-sm text-gray-500 font-medium")
+            async def _dl_hial_csv() -> None:
+                p = HIAL_OUT_DIR / "data" / "high_altitude_aerosol_power.csv"
+                if p.exists():
+                    await _native_save(p.read_bytes(), "high_altitude_aerosol_power.csv", [("CSV file", "*.csv")])
+                else:
+                    ui.notify("数据文件不存在，请先计算", type="warning")
+            ui.button("↓ 功率/SNR", on_click=_dl_hial_csv).props("dense flat").classes("text-sm font-mono text-green-700")
+
+        # ── 刷新回调注册 ──────────────────────────────────────────────────
+        def _redraw_hial() -> None:
+            power_plot.update_figure(fig_hial_power(log_state[0]))
+            snr_plot.update_figure(fig_hial_snr())
+            _render_hial_summary()
+
+        hial_cbs.append(_redraw_hial)
+        _hial_callbacks[:] = hial_cbs
+
+        # ── 按钮绑定 ──────────────────────────────────────────────────────
+        async def _on_compute() -> None:
+            await _do_hial_compute(status_lbl, compute_btn, hial_cbs)
+
+        compute_btn.on_click(_on_compute)
+
+
 def layered_tab(callbacks: list | None = None) -> None:
     with ui.column().classes("w-full gap-4"):
         summary = load_summary().get("layered_atmosphere", {})
@@ -1119,6 +1383,8 @@ def _impact_scope_text(key: tuple) -> str:
         return "影响：噪声底与 SNR"
     elif key[0] == "profile":
         return "影响：分层大气剖面与新回波曲线"
+    elif key[0] == "high_altitude_aerosol":
+        return "影响：高空低气溶胶浓度场景"
     return ""
 
 
@@ -1274,6 +1540,23 @@ def _build_profile_editor(g: dict) -> None:
     _num("S<sub>a</sub>  (sr)",             profile.get("aerosol_lidar_ratio_sr", 50.0),             ("profile", "aerosol_lidar_ratio_sr"),          fmt="%.3f")
 
 
+def _build_highalt_editor(g: dict) -> None:
+    hial = g.get("high_altitude_aerosol", {}) if isinstance(g, dict) else {}
+    _num("H  (m)",      hial.get("height_m", 20000.0),    ("high_altitude_aerosol", "height_m"),  fmt="%.1f")
+    _num("n₀  (cm⁻³)", hial.get("n0_cm3",   7.245788e-1), ("high_altitude_aerosol", "n0_cm3"),   fmt="%.6e")
+    with ui.row().classes("items-start gap-1 mt-1"):
+        ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
+        ui.label(
+            "谱参数固化：Jager & Deshler 2002 平流层硫酸盐  "
+            "r_g=0.10 μm  σ_g=1.86  m=1.43+1e-8i"
+        ).classes("text-xs text-gray-400")
+    with ui.row().classes("items-start gap-1 mt-1"):
+        ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
+        ui.label(
+            "文献基准：H=20000m  n₀=7.2458e-01 cm⁻³  → β 与分层大气严格对齐"
+        ).classes("text-xs text-gray-400")
+
+
 def _build_fog_editor(key: str, spec: dict) -> None:
     _num("N₀  (cm⁻³)", spec.get("n0_cm3", 0.0),  ("fog", key, "n0_cm3"))
     _num("r<sub>g</sub>  (μm)",   spec.get("rg_um", 0.0),   ("fog", key, "rg_um"), fmt="%.4f")
@@ -1307,6 +1590,7 @@ def _collect_overrides() -> dict:
     cli: dict[str, float] = {}
     noise: dict[str, object] = {}
     profile: dict[str, object] = {}
+    high_altitude_aerosol: dict[str, float] = {}
 
     for key, inp in _inputs.items():
         val = inp.value
@@ -1349,6 +1633,9 @@ def _collect_overrides() -> dict:
                 profile["mode"] = str(val)
             else:
                 profile[field] = float(val)
+        elif key[0] == "high_altitude_aerosol":
+            _, field = key
+            high_altitude_aerosol[field] = float(val)
     # system_constant from instrument params
     p0   = _inputs.get(("cli", "laser_peak_power_W"))
     tau  = _inputs.get(("cli", "pulse_width_s"))
@@ -1371,7 +1658,7 @@ def _collect_overrides() -> dict:
     if noise:
         instrument["receiver_noise"] = noise
 
-    return {"fog": fog, "haze": haze, "rain": rain, "cli": cli, "instrument": instrument, "profile": profile}
+    return {"fog": fog, "haze": haze, "rain": rain, "cli": cli, "instrument": instrument, "profile": profile, "high_altitude_aerosol": high_altitude_aerosol}
 
 
 # ---------------------------------------------------------------------------
@@ -1550,6 +1837,9 @@ def _reference_value_for_key(summary: dict, key: tuple):
     if key[0] == "profile":
         _, field = key
         return g.get("atmosphere_profile_model", {}).get(field)
+    if key[0] == "high_altitude_aerosol":
+        _, field = key
+        return g.get("high_altitude_aerosol", {}).get(field)
     if key[0] == "fog":
         _, scenario, field = key
         return summary.get("fog", {}).get(scenario, {}).get("spec", {}).get(field)
@@ -1771,6 +2061,11 @@ _recompute_running = False
 _current_proc: asyncio.subprocess.Process | None = None  # running simulation process
 # Persistent log buffer — survives page rebuilds (not cleared on recompute).
 _log_buf: list[str] = []
+
+# 高空低气溶胶计算状态
+_hial_running = False
+_hial_current_proc: asyncio.subprocess.Process | None = None
+_hial_callbacks: list = []   # 图表刷新回调（在 page 构建后注册）
 _LOG_BUF_MAX_LINES = 5000
 
 # 模块级状态，让 build_left_panel 在页面重建时能恢复显示
@@ -2424,6 +2719,11 @@ def _populate_inputs_from_summary(summary: dict) -> None:
                 inp.value = profile[field]
             elif field in _DEFAULTS["profile"]:
                 inp.value = _DEFAULTS["profile"][field]
+        elif key[0] == "high_altitude_aerosol":
+            _, field = key
+            hial = g.get("high_altitude_aerosol", {})
+            if field in hial:
+                inp.value = hial[field]
 
 
 # ---------------------------------------------------------------------------
@@ -2593,6 +2893,10 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
         with ui.expansion("分层大气", icon="layers").classes("w-full"):
             ui.label("分层模式会额外生成剖面与分层回波图").classes("text-xs text-amber-600 italic mb-1")
             _build_profile_editor(g)
+
+        with ui.expansion("高空低气溶胶浓度", icon="air").classes("w-full"):
+            ui.label("平流层硫酸盐谱（Jager & Deshler 2002），输入高度与数密度").classes("text-xs text-amber-600 italic mb-1")
+            _build_highalt_editor(g)
 
         # ── 场景参数（逐条展开，可编辑） ───────────────────────────────────
         FOG_SCENARIOS  = [("radiation_fog","辐射雾"), ("advection_fog","平流雾")]
@@ -2937,6 +3241,11 @@ def _apply_params_json(params: dict, summary: dict) -> None:
                 inp.value = profile_summary[field]
             elif field in _DEFAULTS["profile"]:
                 inp.value = _DEFAULTS["profile"][field]
+        elif key[0] == "high_altitude_aerosol":
+            _, field = key
+            hial_saved = params.get("high_altitude_aerosol", {})
+            if field in hial_saved:
+                inp.value = hial_saved[field]
 
 
 # ---------------------------------------------------------------------------
@@ -3073,23 +3382,25 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
     with ui.tabs().classes(
         "w-full bg-white rounded-lg shadow-sm sticky top-0 z-10"
     ) as tabs:
-        t_fog   = ui.tab("雾 · 功率",   icon="water_drop")
-        t_haze  = ui.tab("霾 · 功率",   icon="blur_on")
-        t_depol = ui.tab("霾 · 退偏",   icon="tune")
-        t_rain  = ui.tab("雨 · 功率",   icon="grain")
-        t_layered = ui.tab("分层大气", icon="layers")
-        t_snr   = ui.tab("信噪比",      icon="show_chart")
-        t_all   = ui.tab("全场景对比",   icon="compare_arrows")
+        t_fog       = ui.tab("雾 · 功率",        icon="water_drop")
+        t_rain      = ui.tab("雨 · 功率",        icon="grain")
+        t_highalt   = ui.tab("高空低气溶胶浓度",  icon="air")
+        t_haze      = ui.tab("霾 · 功率",        icon="blur_on")
+        t_depol     = ui.tab("霾 · 退偏",        icon="tune")
+        t_layered   = ui.tab("分层大气",          icon="layers")
+        t_snr       = ui.tab("信噪比",            icon="show_chart")
+        t_all       = ui.tab("全场景对比",         icon="compare_arrows")
 
     # 记录标签页切换状态
     tab_name_map = {
-        t_fog: "雾 · 功率",
-        t_haze: "霾 · 功率",
-        t_depol: "霾 · 退偏",
-        t_rain: "雨 · 功率",
+        t_fog:     "雾 · 功率",
+        t_rain:    "雨 · 功率",
+        t_highalt: "高空低气溶胶浓度",
+        t_haze:    "霾 · 功率",
+        t_depol:   "霾 · 退偏",
         t_layered: "分层大气",
-        t_snr: "信噪比",
-        t_all: "全场景对比",
+        t_snr:     "信噪比",
+        t_all:     "全场景对比",
     }
 
     def _on_tab_change(e) -> None:
@@ -3104,13 +3415,14 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
     if last_active_tab and last_active_tab != "log_view":
         # 尝试匹配标签页名称
         tab_map = {
-            "雾 · 功率": t_fog,
-            "霾 · 功率": t_haze,
-            "霾 · 退偏": t_depol,
-            "雨 · 功率": t_rain,
-            "分层大气": t_layered,
-            "信噪比": t_snr,
-            "全场景对比": t_all,
+            "雾 · 功率":       t_fog,
+            "雨 · 功率":       t_rain,
+            "高空低气溶胶浓度": t_highalt,
+            "霾 · 功率":       t_haze,
+            "霾 · 退偏":       t_depol,
+            "分层大气":        t_layered,
+            "信噪比":          t_snr,
+            "全场景对比":      t_all,
         }
         initial_tab = tab_map.get(last_active_tab, t_fog)
 
@@ -3129,6 +3441,23 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                             ("图 2  平流雾","fig02_advection_fog_power")],
                 callbacks=callbacks,
             )
+
+        with ui.tab_panel(t_rain):
+            chart_tab(
+                fig_builder=fig_rain_power,
+                allow_log=True, default_log=True,
+                summary=summary, cat="rain",
+                summary_keys=[("light_rain","小雨"),("moderate_rain","中雨"),("heavy_rain","大雨")],
+                show_depol=False,
+                csv_links=[("小雨","fig11a_LightRain.csv"),
+                           ("中雨","fig11b_ModerateRain.csv"),
+                           ("大雨","fig11c_HeavyRain.csv")],
+                ref_images=[("图 11  小/中/大雨","fig11_rain_power")],
+                callbacks=callbacks,
+            )
+
+        with ui.tab_panel(t_highalt):
+            highalt_tab()
 
         with ui.tab_panel(t_haze):
             chart_tab(
@@ -3169,20 +3498,6 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                             ("图 8  乡村/大陆型霾","fig08_rural_continental_haze_depol"),
                             ("图 9  沙尘型霾","fig09_dust_desert_haze_depol"),
                             ("图 10 海洋性霾","fig10_maritime_haze_depol")],
-                callbacks=callbacks,
-            )
-
-        with ui.tab_panel(t_rain):
-            chart_tab(
-                fig_builder=fig_rain_power,
-                allow_log=True, default_log=True,
-                summary=summary, cat="rain",
-                summary_keys=[("light_rain","小雨"),("moderate_rain","中雨"),("heavy_rain","大雨")],
-                show_depol=False,
-                csv_links=[("小雨","fig11a_LightRain.csv"),
-                           ("中雨","fig11b_ModerateRain.csv"),
-                           ("大雨","fig11c_HeavyRain.csv")],
-                ref_images=[("图 11  小/中/大雨","fig11_rain_power")],
                 callbacks=callbacks,
             )
 
