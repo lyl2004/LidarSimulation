@@ -43,6 +43,7 @@ __pycache__/
 /temp/lidar_1d/hidden_seed_probe_output/
 /temp/lidar_1d/hidden_seed_probe_output_seed_only/
 /temp/lidar_1d/outputs_high_precision_latest/
+/temp/lidar_1d/outputs_high_altitude/
 /temp/lidar_1d/p0_test_backup_*/
 /temp/lidar_1d/param_overrides.json
 /temp/lidar_1d/run_history/

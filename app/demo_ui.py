@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import datetime
+import hashlib
 import io
 import json
 import math
@@ -54,6 +55,15 @@ OVERRIDES  = ROOT / "temp" / "lidar_1d" / "param_overrides.json"
 MFF_SCRIPT   = ROOT / "temp" / "lidar_1d" / "make_final_figures.py"
 HIAL_SCRIPT  = ROOT / "temp" / "lidar_1d" / "high_altitude_aerosol.py"
 HIAL_OUT_DIR = ROOT / "temp" / "lidar_1d" / "outputs_high_altitude" / "local"
+HIAL_CACHE_DIR = ROOT / "temp" / "lidar_1d" / "outputs_high_altitude" / "cache"
+HIAL_MANIFEST  = HIAL_CACHE_DIR / "manifest.json"
+# 文献对齐种子基准（与 high_altitude_aerosol.py 的 REFERENCE_CALIBRATION 保持一致）
+HIAL_SEED = {
+    "height_m": 20000.0,
+    "n0_cm3":   7.776356e2,
+    "label":    "文献对齐基准 (S=50sr 零偏差)",
+}
+HIAL_MAX_HISTORY = 10
 HISTORY_DIR = cache_runtime.LAYOUT.history_root
 MANIFEST    = cache_runtime.LAYOUT.manifest_path
 _DIAG_SESSION = get_or_create_session("gui")
@@ -626,6 +636,144 @@ def _invalidate_hial_cache() -> None:
     _hial_csv_cache.clear()
 
 
+# ---------------------------------------------------------------------------
+# 高空工作流独立轻量缓存
+#   - 与主 manifest/run_history 完全隔离，避免污染主管线
+#   - 语义键 = 规范化的 (H, n0, system_constant, profile, noise)
+#   - 命中：把缓存条目的产物复制回 HIAL_OUT_DIR，现有图表函数无需改动
+#   - 含一条 locked 种子条目（文献对齐基准），不参与淘汰
+# ---------------------------------------------------------------------------
+
+def _hial_semantic_key(H_m: float, n0_cm3: float, sys_c, profile: dict, noise: dict) -> str:
+    """生成稳定的语义键（对参数取规范化后哈希）。"""
+    payload = {
+        "H": round(float(H_m), 3),
+        "n0": float(f"{float(n0_cm3):.10e}"),
+        "sys_c": float(f"{float(sys_c):.10e}") if sys_c is not None else None,
+        "profile": {k: float(f"{float(v):.10e}") for k, v in sorted((profile or {}).items()) if isinstance(v, (int, float))},
+        "noise": {k: (float(f"{float(v):.10e}") if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+                  for k, v in sorted((noise or {}).items())},
+    }
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _hial_load_manifest() -> dict:
+    if not HIAL_MANIFEST.exists():
+        return {"entries": []}
+    try:
+        m = json.loads(HIAL_MANIFEST.read_text(encoding="utf-8"))
+        if isinstance(m, dict) and isinstance(m.get("entries"), list):
+            return m
+    except Exception:
+        pass
+    return {"entries": []}
+
+
+def _hial_save_manifest(m: dict) -> None:
+    HIAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = HIAL_MANIFEST.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(HIAL_MANIFEST)
+
+
+def _hial_entry_dir(key: str) -> Path:
+    return HIAL_CACHE_DIR / key
+
+
+def _hial_find_entry(key: str) -> dict | None:
+    for e in _hial_load_manifest().get("entries", []):
+        if e.get("key") == key:
+            return e
+    return None
+
+
+def _hial_store_result(key: str, H_m: float, n0_cm3: float, label: str = "", locked: bool = False) -> None:
+    """把 HIAL_OUT_DIR 当前产物存入缓存条目，并更新 manifest。"""
+    src_summary = HIAL_OUT_DIR / "summary.json"
+    src_csv     = HIAL_OUT_DIR / "data" / "high_altitude_aerosol_power.csv"
+    if not src_summary.exists() or not src_csv.exists():
+        return
+    dst = _hial_entry_dir(key)
+    (dst / "data").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_summary, dst / "summary.json")
+    shutil.copy2(src_csv, dst / "data" / "high_altitude_aerosol_power.csv")
+
+    m = _hial_load_manifest()
+    entries = [e for e in m.get("entries", []) if e.get("key") != key]
+    new_entry = {
+        "key": key,
+        "height_m": float(H_m),
+        "n0_cm3": float(n0_cm3),
+        "label": label or f"H={H_m:.0f}m  n₀={n0_cm3:.3e}",
+        "locked": bool(locked),
+    }
+    entries.insert(0, new_entry)
+    # 淘汰：保留 locked + 最近 HIAL_MAX_HISTORY 条非 locked
+    locked_entries = [e for e in entries if e.get("locked")]
+    unlocked = [e for e in entries if not e.get("locked")]
+    keep = unlocked[:HIAL_MAX_HISTORY]
+    dropped = unlocked[HIAL_MAX_HISTORY:]
+    for e in dropped:
+        d = _hial_entry_dir(e.get("key", ""))
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    m["entries"] = locked_entries + keep
+    _hial_save_manifest(m)
+
+
+def _hial_restore_from_cache(key: str) -> bool:
+    """把缓存条目产物复制回 HIAL_OUT_DIR，供图表函数读取。"""
+    src = _hial_entry_dir(key)
+    src_summary = src / "summary.json"
+    src_csv     = src / "data" / "high_altitude_aerosol_power.csv"
+    if not src_summary.exists() or not src_csv.exists():
+        return False
+    (HIAL_OUT_DIR / "data").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_summary, HIAL_OUT_DIR / "summary.json")
+    shutil.copy2(src_csv, HIAL_OUT_DIR / "data" / "high_altitude_aerosol_power.csv")
+    _invalidate_hial_cache()
+    return True
+
+
+def _hial_seed_key() -> str:
+    """种子条目的语义键（无 profile/noise/sys_c 覆盖，使用默认）。"""
+    return _hial_semantic_key(HIAL_SEED["height_m"], HIAL_SEED["n0_cm3"], None, {}, {})
+
+
+def ensure_hial_seed() -> None:
+    """启动时确保文献对齐种子条目存在；不存在则同步生成并锁定。
+
+    脚本仅 ~0.05s，同步执行可接受。失败时静默跳过（标签页仍可手动计算）。
+    """
+    key = _hial_seed_key()
+    if _hial_find_entry(key) is not None and _hial_entry_dir(key).joinpath("summary.json").exists():
+        return
+    try:
+        from path_resolver import resolve_mie_python_executable
+        mie_python = resolve_mie_python_executable()
+        cmd = [
+            mie_python, str(HIAL_SCRIPT),
+            "--output", str(HIAL_OUT_DIR),
+            "--height-m", str(HIAL_SEED["height_m"]),
+            "--n0-cm3", str(HIAL_SEED["n0_cm3"]),
+        ]
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        kwargs: dict = {"cwd": str(ROOT), "env": env,
+                        "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        rc = subprocess.run(cmd, **kwargs).returncode
+        if rc == 0:
+            _hial_store_result(key, HIAL_SEED["height_m"], HIAL_SEED["n0_cm3"],
+                               label=HIAL_SEED["label"], locked=True)
+            print("[demo_ui] high-altitude seed baseline generated")
+    except Exception as exc:
+        print(f"[warn] ensure_hial_seed failed: {exc}")
+
+
 def _downsample(data: dict[str, list[float]], max_pts: int = 2000) -> dict[str, list[float]]:
     if not data:
         return data
@@ -1054,6 +1202,27 @@ async def _do_hial_compute(
     noise_cfg = overrides.get("instrument", {}).get("receiver_noise", {})
     sys_c     = overrides.get("cli", {}).get("system-constant", None)
 
+    def _finish(msg: str, ok: bool = True) -> None:
+        global _hial_running
+        if ok:
+            for cb in hial_callbacks:
+                try:
+                    cb()
+                except Exception:
+                    pass
+        _safe_call(status_label.set_text, msg)
+        _safe_call(status_label.classes,
+                   remove="text-blue-600 text-red-600 text-green-600",
+                   add="text-green-600" if ok else "text-red-600")
+        _hial_running = False
+        _safe_call(compute_btn.enable)
+
+    # ── 缓存查找 ──────────────────────────────────────────────────────────
+    key = _hial_semantic_key(H_m, n0_cm3, sys_c, profile, noise_cfg)
+    if _hial_find_entry(key) is not None and _hial_restore_from_cache(key):
+        _finish(f"缓存命中  H={H_m:.0f}m  n₀={n0_cm3:.3e} cm⁻³")
+        return
+
     from path_resolver import resolve_mie_python_executable
     mie_python = resolve_mie_python_executable()
 
@@ -1091,29 +1260,21 @@ async def _do_hial_compute(
         await proc.wait()
         rc = proc.returncode
     except Exception as exc:
-        _safe_call(status_label.set_text, f"子进程异常: {exc}")
-        _safe_call(status_label.classes, remove="text-blue-600", add="text-red-600")
-        _hial_running = False
-        _safe_call(compute_btn.enable)
+        _hial_current_proc = None
+        _finish(f"子进程异常: {exc}", ok=False)
         return
     finally:
         _hial_current_proc = None
 
     if rc == 0:
         _invalidate_hial_cache()
-        for cb in hial_callbacks:
-            try:
-                cb()
-            except Exception:
-                pass
-        _safe_call(status_label.set_text, f"计算完成  H={H_m:.0f}m  n₀={n0_cm3:.3e} cm⁻³")
-        _safe_call(status_label.classes, remove="text-blue-600 text-red-600", add="text-green-600")
+        try:
+            _hial_store_result(key, H_m, n0_cm3)
+        except Exception:
+            pass
+        _finish(f"计算完成  H={H_m:.0f}m  n₀={n0_cm3:.3e} cm⁻³")
     else:
-        _safe_call(status_label.set_text, f"计算失败（返回码 {rc}）")
-        _safe_call(status_label.classes, remove="text-blue-600", add="text-red-600")
-
-    _hial_running = False
-    _safe_call(compute_btn.enable)
+        _finish(f"计算失败（返回码 {rc}）", ok=False)
 
 
 def highalt_tab() -> None:
@@ -1129,6 +1290,12 @@ def highalt_tab() -> None:
                 )
                 status_lbl = ui.label("就绪 — 在左侧输入 H 和 n₀ 后点击计算").classes(
                     "text-xs text-gray-500"
+                )
+            with ui.row().classes("items-center gap-2 mt-2 flex-wrap"):
+                ui.icon("history", size="xs").classes("text-gray-400")
+                ui.label("历史对照：").classes("text-xs text-gray-500")
+                hist_select = ui.select({}, value=None).props("dense outlined options-dense").classes(
+                    "text-xs min-w-64"
                 )
             with ui.row().classes("items-start gap-1 mt-1"):
                 ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
@@ -1214,7 +1381,37 @@ def highalt_tab() -> None:
             snr_plot.update_figure(fig_hial_snr())
             _render_hial_summary()
 
-        hial_cbs.append(_redraw_hial)
+        # 历史选择器：填充选项（locked 种子置顶并加锁标记）
+        def _refresh_hist_options() -> None:
+            entries = _hial_load_manifest().get("entries", [])
+            opts: dict[str, str] = {}
+            for e in entries:
+                k = e.get("key", "")
+                lock = "🔒 " if e.get("locked") else ""
+                opts[k] = f"{lock}{e.get('label', k)}"
+            hist_select.set_options(opts)
+
+        def _on_hist_change(e) -> None:
+            key = e.value
+            if not key:
+                return
+            if _hial_restore_from_cache(key):
+                _redraw_hial()
+                entry = _hial_find_entry(key) or {}
+                _safe_call(status_lbl.set_text, f"已载入历史：{entry.get('label', key)}")
+                _safe_call(status_lbl.classes,
+                           remove="text-blue-600 text-red-600", add="text-green-600")
+            else:
+                ui.notify("历史条目数据缺失", type="warning")
+
+        hist_select.on_value_change(_on_hist_change)
+        _refresh_hist_options()
+
+        def _redraw_with_hist() -> None:
+            _redraw_hial()
+            _refresh_hist_options()
+
+        hial_cbs.append(_redraw_with_hist)
         _hial_callbacks[:] = hial_cbs
 
         # ── 按钮绑定 ──────────────────────────────────────────────────────
@@ -3280,6 +3477,8 @@ def _recover_orphan_run() -> None:
 def index() -> None:
     # 启动时尝试恢复上次因 client 断开而未归档的孤儿运行
     _recover_orphan_run()
+    # 确保高空工作流的文献对齐种子基准存在（内部有存在性检查，重复调用开销极小）
+    ensure_hial_seed()
 
     summary = load_summary()
     _diag_event(
