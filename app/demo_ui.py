@@ -1333,9 +1333,7 @@ def highalt_tab() -> None:
                     with summary_container:
                         ui.label("暂无数据，请先点击「计算」").classes("text-xs text-gray-400 p-2")
                     return
-                inp   = sm.get("input", {})
                 opt   = sm.get("optical", {})
-                ref   = sm.get("layered_reference", {})
                 snrs  = sm.get("snr_summary", {})
 
                 def _ff(v, d=4):
@@ -1343,21 +1341,20 @@ def highalt_tab() -> None:
                 def _f2(v):
                     return f"{v:.2f}" if isinstance(v, float) else "—"
 
+                # 工程应用级别：只展示总系数与 SNR 结果，不拆分子/气溶胶分量
+                a_t = opt.get("alpha_total")
+                b_t = opt.get("beta_total")
+
                 cols = [
                     {"name": "项目", "label": "项目", "field": "项目", "align": "left"},
-                    {"name": "Mie计算值", "label": "Mie 计算值", "field": "Mie计算值", "align": "right"},
-                    {"name": "分层大气参考", "label": "分层大气 H 处参考", "field": "分层大气参考", "align": "right"},
+                    {"name": "结果", "label": "结果", "field": "结果", "align": "right"},
                 ]
                 rows = [
-                    {"项目": f"H (m)",             "Mie计算值": f"{inp.get('height_m', 0):.0f}",         "分层大气参考": "—"},
-                    {"项目": "n₀ (cm⁻³)",          "Mie计算值": _ff(inp.get("n0_cm3")),                  "分层大气参考": "—"},
-                    {"项目": "α_p (m⁻¹)",          "Mie计算值": _ff(opt.get("alpha_particle")),          "分层大气参考": _ff(ref.get("alpha_aerosol_at_H"))},
-                    {"项目": "β_p (m⁻¹sr⁻¹)",     "Mie计算值": _ff(opt.get("beta_particle")),           "分层大气参考": _ff(ref.get("beta_aerosol_at_H"))},
-                    {"项目": "S = α/β (sr)",       "Mie计算值": _f2(opt.get("S_mie_sr")),               "分层大气参考": f"{ref.get('S_assumed_sr', 50):.0f}"},
-                    {"项目": "β 偏差 (%)",         "Mie计算值": f"{ref.get('beta_deviation_pct', 0):+.2f}%", "分层大气参考": "0%"},
-                    {"项目": "SNR@1km (dB)",        "Mie计算值": _f2(snrs.get("snr_db_at_1000m")),        "分层大气参考": "—"},
-                    {"项目": "SNR@2km (dB)",        "Mie计算值": _f2(snrs.get("snr_db_at_2000m")),        "分层大气参考": "—"},
-                    {"项目": "R(SNR≥10) (m)",       "Mie计算值": f"{snrs.get('max_range_snr_ge_10') or '—'}",  "分层大气参考": "—"},
+                    {"项目": "总消光系数 α (m⁻¹)",         "结果": _ff(a_t)},
+                    {"项目": "总后向散射系数 β (m⁻¹sr⁻¹)", "结果": _ff(b_t)},
+                    {"项目": "SNR@1km (dB)",               "结果": _f2(snrs.get("snr_db_at_1000m"))},
+                    {"项目": "SNR@2km (dB)",               "结果": _f2(snrs.get("snr_db_at_2000m"))},
+                    {"项目": "R(SNR≥10) (m)",              "结果": f"{snrs.get('max_range_snr_ge_10') or '—'}"},
                 ]
                 with summary_container:
                     ui.table(columns=cols, rows=rows).classes("w-full text-xs").props("dense flat bordered separator=cell")
@@ -1742,17 +1739,6 @@ def _build_highalt_editor(g: dict) -> None:
     hial = g.get("high_altitude_aerosol", {}) if isinstance(g, dict) else {}
     _num("H  (m)",      hial.get("height_m", 20000.0),    ("high_altitude_aerosol", "height_m"),  fmt="%.1f")
     _num("n₀  (cm⁻³)", hial.get("n0_cm3",   7.776356e2),  ("high_altitude_aerosol", "n0_cm3"),   fmt="%.6e")
-    with ui.row().classes("items-start gap-1 mt-1"):
-        ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
-        ui.label(
-            "等效谱固化：高空吸收性传输层（黑碳/烟尘）  "
-            "r_g=0.02564 μm  σ_g=1.6  m=1.6+0.3i  → S=50 sr"
-        ).classes("text-xs text-gray-400")
-    with ui.row().classes("items-start gap-1 mt-1"):
-        ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
-        ui.label(
-            "文献基准：H=20000m  n₀=7.7764e+02 cm⁻³  → α、β 与分层大气零偏差"
-        ).classes("text-xs text-gray-400")
 
 
 def _build_fog_editor(key: str, spec: dict) -> None:
@@ -3093,7 +3079,6 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
             _build_profile_editor(g)
 
         with ui.expansion("高空低气溶胶浓度", icon="air").classes("w-full"):
-            ui.label("高空吸收性传输层等效谱（S=50sr 对齐分层大气），输入高度与数密度").classes("text-xs text-amber-600 italic mb-1")
             _build_highalt_editor(g)
 
         # ── 场景参数（逐条展开，可编辑） ───────────────────────────────────
