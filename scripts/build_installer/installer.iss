@@ -40,6 +40,7 @@ Source: "..\..\src\*";        DestDir: "{app}\src";  Flags: recursesubdirs ignor
 ; Only computation scripts are shipped — no documentation files.
 Source: "..\..\temp\lidar_1d\lidar_1d_simulation.py"; DestDir: "{app}\temp\lidar_1d"; Flags: ignoreversion
 Source: "..\..\temp\lidar_1d\make_final_figures.py";   DestDir: "{app}\temp\lidar_1d"; Flags: ignoreversion
+Source: "..\..\temp\lidar_1d\high_altitude_aerosol.py"; DestDir: "{app}\temp\lidar_1d"; Flags: ignoreversion
 Source: "..\..\temp\lidar_1d\julia\*"; DestDir: "{app}\temp\lidar_1d\julia"; Flags: recursesubdirs ignoreversion
 Source: "..\..\pixi.toml";    DestDir: "{app}";      Flags: ignoreversion
 Source: "..\..\pixi.lock";    DestDir: "{app}";      Flags: ignoreversion skipifsourcedoesntexist
@@ -61,6 +62,7 @@ Source: "dist\cache_store\*"; DestDir: "{app}\temp\lidar_1d\cache_store"; Flags:
 
 ; ── Default result set (shipped snapshot for first display + cache seed) ────
 Source: "dist\default_result\*"; DestDir: "{app}\temp\lidar_1d\default_result"; Flags: recursesubdirs ignoreversion skipifsourcedoesntexist
+Source: "dist\outputs_high_altitude\*"; DestDir: "{app}\temp\lidar_1d\outputs_high_altitude"; Flags: recursesubdirs ignoreversion skipifsourcedoesntexist
 
 ; ── Local history snapshot (for reproducible demo/test states) ──────────────
 Source: "dist\run_history\*"; DestDir: "{app}\temp\lidar_1d\run_history"; Flags: recursesubdirs ignoreversion skipifsourcedoesntexist

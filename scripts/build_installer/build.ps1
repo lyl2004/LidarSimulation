@@ -24,8 +24,8 @@
 param(
     [string]$AppVersion = "1.0",
     # 打包携带的历史记录列表（逗号分隔的 run_id:显示名 对，显示名可省略）
-    # 格式示例: "run_20260612_193512:分层大气测试用例,run_20260611_222851:532nm-30km"
-    [string]$PackagedHistoryEntries = "run_20260612_193512:分层大气测试用例,run_20260611_222851:532nm-30km",
+    # 格式示例: "run_20260613_230815:分层大气-532nm-30km"
+    [string]$PackagedHistoryEntries = "run_20260613_230815:分层大气-532nm-30km (用例4)",
     [switch]$Repack,
     [switch]$CleanBuild
 )
@@ -300,6 +300,23 @@ if (Test-Path $defaultResultSrc) {
 } else {
     Write-Error "  默认结果集不存在，已中止打包。请先生成并放置 temp/lidar_1d/default_result/"
     exit 1
+}
+
+# --------------------------------------------------------------------------
+# 3.6. Copy high-altitude aerosol independent cache (use-case 5 seed)
+# --------------------------------------------------------------------------
+Write-Step "复制高空低气溶胶独立缓存（如果存在）"
+$highAltSrc  = Join-Path $repoRoot "temp\lidar_1d\outputs_high_altitude"
+$highAltDist = Join-Path $distDir  "outputs_high_altitude"
+if (Test-Path (Join-Path $highAltSrc "cache\manifest.json")) {
+    Write-Host "  发现高空缓存（含 locked 种子），复制 cache/ 到 dist/"
+    if (Test-Path $highAltDist) { Remove-Item -Path $highAltDist -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $highAltDist | Out-Null
+    # 仅复制 cache/（含 manifest 与种子条目）；local/ 是运行期临时输出，无需打包
+    Copy-Item -Path (Join-Path $highAltSrc "cache") -Destination (Join-Path $highAltDist "cache") -Recurse -Force
+    Write-Host "  高空缓存已复制"
+} else {
+    Write-Host "  未找到高空缓存种子，跳过（首次启动时 ensure_hial_seed 会自动生成）"
 }
 
 Write-Step "导出隐藏种子缓存"
