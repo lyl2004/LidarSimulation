@@ -9,15 +9,21 @@
 
 物理模型：
   气溶胶谱采用与分层大气经验 Lidar 比 S=50sr 对齐的等效谱（黑碳/烟尘型，
-  折射率 m=1.6+0.3i、σ_g=1.6，r_g 标定使 Mie 计算 S=50sr）。数密度 n0 由用户指定。
+  折射率 m=1.6+0.3i、σ_g=1.6）。中值半径 r_g 在运行时按当前波长二分标定，使 Mie
+  计算的 S=50sr —— 因 S 随波长漂移，r_g 必须随波长重标，否则非 1550nm 时 S 大幅偏离。
   气溶胶光学系数通过 Mie 积分从第一性原理计算。
   分子散射项直接取自分层大气模型在 H 处的解析值（公式同源，见 layered_molecular_at_H），
-  保证两工作流的分子项逐点一致。
+  随波长按 λ^-4 变化，保证两工作流的分子项逐点一致。
   功率方程和 SNR 按均匀层模型求解（详见 summary.json 中的 physics_note）。
 
+波长一致性：
+  波长由 --wavelength-nm 指定（前端传入）。r_g 与分子项均随波长重算，故任意波长下
+  总 α、总 β 都与分层大气在 H 处一致。--calibrate-n0 时 n0 也按波长标定，使气溶胶
+  beta 零偏差（种子基准使用此选项）。
+
 参考基准（文献对齐记录）：
-  H = 20000 m，n0 = 7.776356e+02 cm^-3
-  使 Mie 的 alpha、beta 与分层大气模型 H=20000m 处气溶胶解析值同时零偏差，S=50sr。
+  H = 20000 m，wl = 1550 nm，--calibrate-n0 → n0 ≈ 7.776e+02 cm^-3
+  使 Mie 的 alpha、beta 与分层大气 H=20000m 处气溶胶解析值同时零偏差，S=50sr。
   标定时间：2026-06-13。
 
 CLI 接口与 lidar_1d_simulation.py 保持一致，输出目录结构相同。
@@ -141,13 +147,14 @@ def _lognormal_density(radius_m: np.ndarray, n0_cm3: float, rg_um: float, sigma_
     return n0_m3 / (math.sqrt(2.0 * math.pi) * radius_m * ln_sig) * np.exp(exp_)
 
 
-def _mie_cross_sections(radius_um: np.ndarray, m_real: float, m_imag: float) -> tuple[np.ndarray, np.ndarray]:
+def _mie_cross_sections(radius_um: np.ndarray, m_real: float, m_imag: float,
+                        wavelength_nm: float) -> tuple[np.ndarray, np.ndarray]:
     sigma_ext  = np.empty(len(radius_um))
     sigma_back = np.empty(len(radius_um))
     for i, r in enumerate(radius_um):
         qext, _, _, _, _, qback, _ = AutoMieQ(
             complex(float(m_real), abs(float(m_imag))),
-            WAVELENGTH_NM,
+            float(wavelength_nm),
             2.0 * float(r) * 1000.0,
             asDict=False,
         )
@@ -157,21 +164,54 @@ def _mie_cross_sections(radius_um: np.ndarray, m_real: float, m_imag: float) -> 
     return sigma_ext, sigma_back
 
 
-def compute_mie_factors() -> tuple[float, float]:
-    """返回单位浓度（1 cm^-3）下的 (F_beta, F_alpha)。"""
+def compute_mie_factors(wavelength_nm: float, rg_um: float) -> tuple[float, float]:
+    """返回单位浓度（1 cm^-3）下的 (F_beta, F_alpha)，给定波长与中值半径。"""
     spec = STRAT_AEROSOL
     radius_um = np.geomspace(spec["r_min_um"], spec["r_max_um"], MIE_GRID_COUNT)
     radius_m  = radius_um * 1e-6
-    density   = _lognormal_density(radius_m, 1.0, spec["rg_um"], spec["sigma_g"])
-    sigma_ext, sigma_back = _mie_cross_sections(radius_um, spec["m_real"], spec["m_imag"])
+    density   = _lognormal_density(radius_m, 1.0, rg_um, spec["sigma_g"])
+    sigma_ext, sigma_back = _mie_cross_sections(
+        radius_um, spec["m_real"], spec["m_imag"], wavelength_nm
+    )
     F_beta  = _spectral_integral(sigma_back * density, radius_m)
     F_alpha = _spectral_integral(sigma_ext  * density, radius_m)
     return F_beta, F_alpha
 
 
-def compute_optical_coeffs(n0_cm3: float) -> tuple[float, float, float]:
-    """返回 (beta_particle, alpha_particle, S_mie)。"""
-    F_beta, F_alpha = compute_mie_factors()
+def _S_of_rg(rg_um: float, wavelength_nm: float) -> float:
+    F_beta, F_alpha = compute_mie_factors(wavelength_nm, rg_um)
+    return F_alpha / F_beta if F_beta > 0 else float("inf")
+
+
+def calibrate_rg_for_S(wavelength_nm: float, target_S: float = 50.0,
+                       rg_lo: float = 0.002, rg_hi: float = 0.20,
+                       iters: int = 50) -> float:
+    """二分求解中值半径 r_g，使等效谱在给定波长下的 Mie 激光雷达比 S=target_S。
+
+    S(r_g) 在该谱型下随 r_g 单调递减（小粒子瑞利区 S 大，增大后趋近几何区）。
+    与分层大气对所有波长假设的气溶胶 S=50sr 对齐，使任意波长下气溶胶 α、β
+    都能与分层大气在 H 处零偏差。
+    """
+    S_lo = _S_of_rg(rg_lo, wavelength_nm)
+    S_hi = _S_of_rg(rg_hi, wavelength_nm)
+    if not (S_hi < target_S < S_lo):
+        # 未括住目标：回退到 1550nm 标定值，避免崩溃（极端波长边界）
+        print(f"[warn] r_g 标定未括住 S={target_S}（S∈[{S_hi:.2f},{S_lo:.2f}] "
+              f"@ {wavelength_nm}nm），回退 r_g={STRAT_AEROSOL['rg_um']}")
+        return float(STRAT_AEROSOL["rg_um"])
+    lo, hi = rg_lo, rg_hi
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        if _S_of_rg(mid, wavelength_nm) > target_S:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def compute_optical_coeffs(n0_cm3: float, wavelength_nm: float, rg_um: float) -> tuple[float, float, float]:
+    """返回 (beta_particle, alpha_particle, S_mie)，给定波长与已标定 r_g。"""
+    F_beta, F_alpha = compute_mie_factors(wavelength_nm, rg_um)
     beta_p  = n0_cm3 * F_beta
     alpha_p = n0_cm3 * F_alpha
     S_mie   = alpha_p / beta_p if beta_p > 0 else float("nan")
@@ -211,6 +251,7 @@ def compute_noise_metrics(
     power_signal_W: np.ndarray,
     gate_time_s: float,
     noise: dict,
+    wavelength_nm: float = WAVELENGTH_NM,
 ) -> dict:
     power_signal = np.asarray(power_signal_W, dtype=float)
     if not noise.get("enabled", True):
@@ -222,7 +263,7 @@ def compute_noise_metrics(
             "snr_linear":         np.full_like(power_signal, np.nan),
             "snr_db":             np.full_like(power_signal, np.nan),
         }
-    photon_energy    = PLANCK_CONSTANT_J_S * LIDAR_C_M_S / (WAVELENGTH_NM * 1e-9)
+    photon_energy    = PLANCK_CONSTANT_J_S * LIDAR_C_M_S / (float(wavelength_nm) * 1e-9)
     eta_q            = max(float(noise.get("quantum_efficiency", 0.6)), 1e-12)
     avg              = max(int(noise.get("average_pulses", 1000)), 1)
     bg_power         = float(noise.get("background_power_W", 1e-12))
@@ -305,6 +346,7 @@ def run(args: argparse.Namespace) -> None:
 
     H_m    = float(args.height_m)
     n0_cm3 = float(args.n0_cm3)
+    wavelength_nm = float(getattr(args, "wavelength_nm", WAVELENGTH_NM))
 
     noise = dict(DEFAULT_NOISE_MODEL)
     if args.noise_overrides:
@@ -327,17 +369,29 @@ def run(args: argparse.Namespace) -> None:
             pass
     profile_config = normalize_profile_config(profile_overrides)
 
-    print(f"[high_alt] H={H_m:.0f}m  n0={n0_cm3:.4e} cm^-3")
+    print(f"[high_alt] H={H_m:.0f}m  n0={n0_cm3:.4e} cm^-3  wl={wavelength_nm:.0f}nm")
 
-    # Mie 计算
+    # 气溶胶等效谱：按当前波长在运行时标定 r_g，使 Mie 的 S=50sr 与分层大气经验值
+    # 一致（S 随波长变，故 r_g 必须随波长重标，否则非 1550nm 时 S 会大幅偏离）。
     t_mie = time.perf_counter()
-    beta_p, alpha_p, S_mie = compute_optical_coeffs(n0_cm3)
-    elapsed_mie = time.perf_counter() - t_mie
+    rg_cal = calibrate_rg_for_S(wavelength_nm, target_S=50.0)
+    F_beta, F_alpha = compute_mie_factors(wavelength_nm, rg_cal)
 
-    # 分子项：从分层大气模型取 H 处的解析值（方案 A，源同分层模型）
-    # 旧实现误用地面常数 4pi*1.9e-8 / 1.6e-7，在 H=20km 处分子 beta 偏高约
-    # 195 倍、alpha 偏高约 16 倍，会淹没气溶胶信号。改为 H 处分子值后两工作流一致。
-    beta_mol_H, alpha_mol_H = layered_molecular_at_H(H_m, WAVELENGTH_NM, profile_config)
+    # 可选 n0 标定：使气溶胶 beta 在 H 处与分层大气解析值零偏差（任意波长成立）。
+    # 不同波长下 F_beta 不同，固定 n0 无法在所有波长保持零偏差，故种子用此标定。
+    beta_layered_H_pre = layered_beta_at_H(H_m, profile_config)
+    if getattr(args, "calibrate_n0", False) and F_beta > 0:
+        n0_cm3 = beta_layered_H_pre / F_beta
+        print(f"[high_alt] n0 标定 → {n0_cm3:.4e} cm^-3（使 beta 在 H 处零偏差）")
+
+    beta_p  = n0_cm3 * F_beta
+    alpha_p = n0_cm3 * F_alpha
+    S_mie   = alpha_p / beta_p if beta_p > 0 else float("nan")
+    elapsed_mie = time.perf_counter() - t_mie
+    print(f"[high_alt] r_g 标定={rg_cal:.6f}um @ {wavelength_nm:.0f}nm → S_mie={S_mie:.2f}sr")
+
+    # 分子项：从分层大气模型取 H 处的解析值（方案 A，源同分层模型，传入相同波长）
+    beta_mol_H, alpha_mol_H = layered_molecular_at_H(H_m, wavelength_nm, profile_config)
     alpha_total    = alpha_p + alpha_mol_H
     beta_total     = beta_p  + beta_mol_H
 
@@ -365,7 +419,7 @@ def run(args: argparse.Namespace) -> None:
         overlap=1.0,
     )
 
-    noise_metrics = compute_noise_metrics(result["power_signal_raw"], tau_s, noise)
+    noise_metrics = compute_noise_metrics(result["power_signal_raw"], tau_s, noise, wavelength_nm)
     snr_sum       = snr_summary(range_m, noise_metrics["snr_linear"], noise_metrics["snr_db"])
 
     # 写 CSV
@@ -395,8 +449,9 @@ def run(args: argparse.Namespace) -> None:
             "input": {
                 "height_m":  H_m,
                 "n0_cm3":    n0_cm3,
+                "wavelength_nm": wavelength_nm,
             },
-            "particle_spec": STRAT_AEROSOL,
+            "particle_spec": {**STRAT_AEROSOL, "rg_um_calibrated": rg_cal},
             "optical": {
                 "alpha_particle":  alpha_p,
                 "beta_particle":   beta_p,
@@ -452,8 +507,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--height-m",        type=float, default=20000.0, help="气溶胶高度 H (m)")
     p.add_argument("--n0-cm3",          type=float, default=7.776356e2,
                    help="粒子数密度 n0 (cm^-3)，默认为文献对齐基准值")
+    p.add_argument("--calibrate-n0",    action="store_true",
+                   help="自动标定 n0 使气溶胶 beta 在 H 处与分层大气零偏差（任意波长）")
     p.add_argument("--range-max-m",     type=float, default=2000.0)
     p.add_argument("--range-step-m",    type=float, default=1.0)
+    p.add_argument("--wavelength-nm",   type=float, default=WAVELENGTH_NM,
+                   help="激光波长 (nm)，r_g 与分子项随波长重标定")
     p.add_argument("--system-constant", type=float, default=DEFAULT_SYSTEM_CONSTANT)
     p.add_argument("--pulse-width-s",   type=float, default=LIDAR_PULSE_WIDTH_S)
     p.add_argument("--noise-overrides", type=str,   default=None,

@@ -61,7 +61,8 @@ HIAL_MANIFEST  = HIAL_CACHE_DIR / "manifest.json"
 HIAL_SEED = {
     "height_m": 20000.0,
     "n0_cm3":   7.776356e2,
-    "label":    "文献对齐基准 (S=50sr 零偏差)",
+    "wavelength_nm": 1550.0,
+    "label":    "文献对齐基准 (1550nm, S=50sr 零偏差)",
 }
 HIAL_MAX_HISTORY = 10
 HISTORY_DIR = cache_runtime.LAYOUT.history_root
@@ -644,11 +645,12 @@ def _invalidate_hial_cache() -> None:
 #   - 含一条 locked 种子条目（文献对齐基准），不参与淘汰
 # ---------------------------------------------------------------------------
 
-def _hial_semantic_key(H_m: float, n0_cm3: float, sys_c, profile: dict, noise: dict) -> str:
+def _hial_semantic_key(H_m: float, n0_cm3: float, sys_c, profile: dict, noise: dict, wl_nm=None) -> str:
     """生成稳定的语义键（对参数取规范化后哈希）。"""
     payload = {
         "H": round(float(H_m), 3),
         "n0": float(f"{float(n0_cm3):.10e}"),
+        "wl": float(f"{float(wl_nm):.6e}") if wl_nm is not None else None,
         "sys_c": float(f"{float(sys_c):.10e}") if sys_c is not None else None,
         "profile": {k: float(f"{float(v):.10e}") for k, v in sorted((profile or {}).items()) if isinstance(v, (int, float))},
         "noise": {k: (float(f"{float(v):.10e}") if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
@@ -737,8 +739,9 @@ def _hial_restore_from_cache(key: str) -> bool:
 
 
 def _hial_seed_key() -> str:
-    """种子条目的语义键（无 profile/noise/sys_c 覆盖，使用默认）。"""
-    return _hial_semantic_key(HIAL_SEED["height_m"], HIAL_SEED["n0_cm3"], None, {}, {})
+    """种子条目的语义键（无 profile/noise/sys_c 覆盖，波长固定 1550nm）。"""
+    return _hial_semantic_key(HIAL_SEED["height_m"], HIAL_SEED["n0_cm3"], None, {}, {},
+                              HIAL_SEED["wavelength_nm"])
 
 
 def ensure_hial_seed() -> None:
@@ -757,6 +760,8 @@ def ensure_hial_seed() -> None:
             "--output", str(HIAL_OUT_DIR),
             "--height-m", str(HIAL_SEED["height_m"]),
             "--n0-cm3", str(HIAL_SEED["n0_cm3"]),
+            "--wavelength-nm", str(HIAL_SEED["wavelength_nm"]),
+            "--calibrate-n0",
         ]
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
@@ -1200,7 +1205,9 @@ async def _do_hial_compute(
     n0_cm3    = float(hial_cfg.get("n0_cm3",   7.776356e2))
     profile   = overrides.get("profile", {})
     noise_cfg = overrides.get("instrument", {}).get("receiver_noise", {})
-    sys_c     = overrides.get("cli", {}).get("system-constant", None)
+    cli_cfg   = overrides.get("cli", {})
+    sys_c     = cli_cfg.get("system-constant", None)
+    wl_nm     = cli_cfg.get("wavelength-nm", None)
 
     def _finish(msg: str, ok: bool = True) -> None:
         global _hial_running
@@ -1218,7 +1225,7 @@ async def _do_hial_compute(
         _safe_call(compute_btn.enable)
 
     # ── 缓存查找 ──────────────────────────────────────────────────────────
-    key = _hial_semantic_key(H_m, n0_cm3, sys_c, profile, noise_cfg)
+    key = _hial_semantic_key(H_m, n0_cm3, sys_c, profile, noise_cfg, wl_nm)
     if _hial_find_entry(key) is not None and _hial_restore_from_cache(key):
         _finish(f"缓存命中  H={H_m:.0f}m  n₀={n0_cm3:.3e} cm⁻³")
         return
@@ -1234,6 +1241,8 @@ async def _do_hial_compute(
     ]
     if sys_c is not None:
         cmd += ["--system-constant", str(sys_c)]
+    if wl_nm is not None:
+        cmd += ["--wavelength-nm", str(wl_nm)]
     if profile:
         cmd += ["--profile-json", json.dumps(profile)]
     if noise_cfg:
@@ -1320,7 +1329,7 @@ def highalt_tab() -> None:
         # ── SNR 曲线 ──────────────────────────────────────────────────────
         with ui.card().classes("w-full p-4 shadow-none border"):
             ui.label("信噪比 SNR(R)").classes("font-semibold text-sm text-gray-700 mb-2")
-            snr_plot = ui.plotly(fig_hial_snr()).classes("w-full").style("min-height:320px; overflow:hidden")
+            snr_plot = ui.plotly(fig_hial_snr()).classes("w-full").style("min-height:380px; overflow:hidden")
 
         # ── 数值摘要 ──────────────────────────────────────────────────────
         with ui.expansion("数值摘要", icon="table_chart", value=True).classes("w-full"):
