@@ -3,18 +3,22 @@
 """
 高空低浓度气溶胶仿真脚本
 
-物理模型：
-  在指定高度 H 处存在均匀分布的平流层气溶胶，粒子谱采用 Jager & Deshler (2002)
-  SAGE II 反演的平流层硫酸盐典型参数（硬编码），数密度 n0 由用户指定。
+场景设定：
+  激光雷达架设在分层大气中高度 H 处，沿水平方向探测。水平路径上高度恒为 H，
+  故气溶胶与分子的 α、β 均取 H 处的值并沿程均匀（均匀层模型）。
 
-  光学系数通过 Mie 积分从第一性原理计算，不使用经验 Lidar 比假设。
-  功率方程和 SNR 按均匀层模型（非高度连续分布）求解，
-  与分层大气模式的物理意义不同（详见 summary.json 中的 physics_note）。
+物理模型：
+  气溶胶谱采用与分层大气经验 Lidar 比 S=50sr 对齐的等效谱（黑碳/烟尘型，
+  折射率 m=1.6+0.3i、σ_g=1.6，r_g 标定使 Mie 计算 S=50sr）。数密度 n0 由用户指定。
+  气溶胶光学系数通过 Mie 积分从第一性原理计算。
+  分子散射项直接取自分层大气模型在 H 处的解析值（公式同源，见 layered_molecular_at_H），
+  保证两工作流的分子项逐点一致。
+  功率方程和 SNR 按均匀层模型求解（详见 summary.json 中的 physics_note）。
 
 参考基准（文献对齐记录）：
-  H = 20000 m，n0 = 7.091e-01 cm^-3
-  使 beta_mie 与分层大气模型 H=20000m 处严格对齐（偏差 <0.001%）
-  标定时间：2026-06-13，谱参数来源：Jager & Deshler 2002 Table 1
+  H = 20000 m，n0 = 7.776356e+02 cm^-3
+  使 Mie 的 alpha、beta 与分层大气模型 H=20000m 处气溶胶解析值同时零偏差，S=50sr。
+  标定时间：2026-06-13。
 
 CLI 接口与 lidar_1d_simulation.py 保持一致，输出目录结构相同。
 """
@@ -90,11 +94,10 @@ REFERENCE_CALIBRATION = {
 }
 
 # ---------------------------------------------------------------------------
-# 仪器与分子常数（与 lidar_1d_simulation.py 保持一致）
+# 仪器常数（与 lidar_1d_simulation.py 保持一致）
+# 分子散射不再使用地面常数；改由 layered_molecular_at_H() 从分层大气模型取 H 处值。
 # ---------------------------------------------------------------------------
 WAVELENGTH_NM           = 1550.0
-ALPHA_MOL               = 1.6e-7
-BETA_MOL                = 1.9e-8
 LIDAR_P0_W              = 50.0
 LIDAR_C_M_S             = 3.0e8
 LIDAR_PULSE_WIDTH_S     = 2.0e-7
@@ -175,10 +178,6 @@ def compute_optical_coeffs(n0_cm3: float) -> tuple[float, float, float]:
     return beta_p, alpha_p, S_mie
 
 
-def molecular_backscatter_ref(beta_mol: float) -> float:
-    return float(4.0 * math.pi * beta_mol)
-
-
 def layered_beta_at_H(H_m: float, profile_config: dict) -> float:
     """从分层大气解析式取 beta_aerosol(H)，用于对照输出。"""
     b0_bnd = float(profile_config.get("aerosol_boundary_beta0_m_inv_sr", 2.47e-6))
@@ -189,6 +188,23 @@ def layered_beta_at_H(H_m: float, profile_config: dict) -> float:
     bnd = b0_bnd * math.exp(-H_m / h_bnd)
     lyr = b0_lyr * math.exp(-((H_m - c_lyr) / w_lyr) ** 2)
     return bnd + lyr
+
+
+def layered_molecular_at_H(H_m: float, wavelength_nm: float, profile_config: dict) -> tuple[float, float]:
+    """从分层大气模型取 H 处的 (beta_molecular, alpha_molecular)。
+
+    与 atmosphere_profile.build_ideal_layered_profile 的分子项公式逐项同源：
+        beta_mol(R) = beta0 * exp(-R/H_scale) * (ref_nm/wl)^4
+        alpha_mol   = S_mol * beta_mol
+    在“H 处水平探测”场景下，沿水平路径高度恒为 H，故取 R=H 的值并沿程均匀。
+    """
+    b0    = float(profile_config["molecular_beta0_m_inv_sr"])
+    hsc   = float(profile_config["molecular_scale_height_m"])
+    refnm = float(profile_config["molecular_reference_wavelength_nm"])
+    s_mol = float(profile_config["molecular_lidar_ratio_sr"])
+    beta_mol  = b0 * math.exp(-H_m / hsc) * (refnm / float(wavelength_nm)) ** 4
+    alpha_mol = s_mol * beta_mol
+    return beta_mol, alpha_mol
 
 
 def compute_noise_metrics(
@@ -318,9 +334,12 @@ def run(args: argparse.Namespace) -> None:
     beta_p, alpha_p, S_mie = compute_optical_coeffs(n0_cm3)
     elapsed_mie = time.perf_counter() - t_mie
 
-    beta_mol_ref   = molecular_backscatter_ref(BETA_MOL)
-    alpha_total    = alpha_p + ALPHA_MOL
-    beta_total     = beta_p  + beta_mol_ref
+    # 分子项：从分层大气模型取 H 处的解析值（方案 A，源同分层模型）
+    # 旧实现误用地面常数 4pi*1.9e-8 / 1.6e-7，在 H=20km 处分子 beta 偏高约
+    # 195 倍、alpha 偏高约 16 倍，会淹没气溶胶信号。改为 H 处分子值后两工作流一致。
+    beta_mol_H, alpha_mol_H = layered_molecular_at_H(H_m, WAVELENGTH_NM, profile_config)
+    alpha_total    = alpha_p + alpha_mol_H
+    beta_total     = beta_p  + beta_mol_H
 
     # 分层大气对照值
     beta_layered_H   = layered_beta_at_H(H_m, profile_config)
@@ -329,7 +348,8 @@ def run(args: argparse.Namespace) -> None:
     alpha_deviation  = (alpha_p - alpha_layered_H) / max(abs(alpha_layered_H), 1e-300)
 
     print(f"[high_alt] beta_p={beta_p:.4e}  alpha_p={alpha_p:.4e}  S={S_mie:.2f}sr")
-    print(f"[high_alt] 分层大气对照 beta={beta_layered_H:.4e}  alpha={alpha_layered_H:.4e}  S=50sr")
+    print(f"[high_alt] 分子(H处) beta={beta_mol_H:.4e}  alpha={alpha_mol_H:.4e}")
+    print(f"[high_alt] 分层大气对照 beta_aero={beta_layered_H:.4e}  alpha_aero={alpha_layered_H:.4e}  S=50sr")
     print(f"[high_alt] beta偏差={beta_deviation*100:+.2f}%  alpha偏差={alpha_deviation*100:+.2f}%")
 
     # 构造均匀层光学廓线
@@ -381,8 +401,12 @@ def run(args: argparse.Namespace) -> None:
                 "alpha_particle":  alpha_p,
                 "beta_particle":   beta_p,
                 "S_mie_sr":        S_mie,
+                "alpha_molecular": alpha_mol_H,
+                "beta_molecular":  beta_mol_H,
                 "alpha_total":     alpha_total,
                 "beta_total":      beta_total,
+                "molecular_fraction_beta": float(beta_mol_H / beta_total) if beta_total > 0 else None,
+                "molecular_fraction_alpha": float(alpha_mol_H / alpha_total) if alpha_total > 0 else None,
             },
             "layered_reference": {
                 "beta_aerosol_at_H":  beta_layered_H,
@@ -390,6 +414,12 @@ def run(args: argparse.Namespace) -> None:
                 "S_assumed_sr":       50.0,
                 "beta_deviation_pct": float(beta_deviation * 100),
                 "alpha_deviation_pct":float(alpha_deviation * 100),
+                "beta_molecular_at_H":  beta_mol_H,
+                "alpha_molecular_at_H": alpha_mol_H,
+                "molecular_note": (
+                    "分子项直接取自分层大气模型在 H 处的解析值（公式同源），"
+                    "故两工作流的分子散射逐点一致，无偏差。"
+                ),
             },
             "snr_summary": snr_sum,
             "noise": noise,
