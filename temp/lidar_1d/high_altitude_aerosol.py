@@ -505,8 +505,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--output",          required=True,  help="输出目录")
     p.add_argument("--height-m",        type=float, default=20000.0, help="气溶胶高度 H (m)")
-    p.add_argument("--n0-cm3",          type=float, default=7.776356e2,
-                   help="粒子数密度 n0 (cm^-3)，默认为文献对齐基准值")
+    p.add_argument("--n0-cm3",          type=float, default=6.66e3,
+                   help="粒子数密度 n0 (cm^-3)，默认为用例5基准值（532nm）")
     p.add_argument("--calibrate-n0",    action="store_true",
                    help="自动标定 n0 使气溶胶 beta 在 H 处与分层大气零偏差（任意波长）")
     p.add_argument("--range-max-m",     type=float, default=2000.0)

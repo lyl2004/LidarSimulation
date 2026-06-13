@@ -60,9 +60,9 @@ HIAL_MANIFEST  = HIAL_CACHE_DIR / "manifest.json"
 # 文献对齐种子基准（与 high_altitude_aerosol.py 的 REFERENCE_CALIBRATION 保持一致）
 HIAL_SEED = {
     "height_m": 20000.0,
-    "n0_cm3":   7.776356e2,
-    "wavelength_nm": 1550.0,
-    "label":    "文献对齐基准 (1550nm, S=50sr 零偏差)",
+    "n0_cm3":   6.66e3,
+    "wavelength_nm": 532.0,
+    "label":    "用例5 高空低气溶胶 (532nm, H=20km, N0=6.66e3)",
 }
 HIAL_MAX_HISTORY = 10
 HISTORY_DIR = cache_runtime.LAYOUT.history_root
@@ -707,7 +707,7 @@ def _hial_store_result(key: str, H_m: float, n0_cm3: float, label: str = "", loc
         "key": key,
         "height_m": float(H_m),
         "n0_cm3": float(n0_cm3),
-        "label": label or f"H={H_m:.0f}m  n₀={n0_cm3:.3e}",
+        "label": label or f"H={H_m:.0f}m  N₀={n0_cm3:.3e}",
         "locked": bool(locked),
     }
     entries.insert(0, new_entry)
@@ -761,7 +761,6 @@ def ensure_hial_seed() -> None:
             "--height-m", str(HIAL_SEED["height_m"]),
             "--n0-cm3", str(HIAL_SEED["n0_cm3"]),
             "--wavelength-nm", str(HIAL_SEED["wavelength_nm"]),
-            "--calibrate-n0",
         ]
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
@@ -1202,7 +1201,7 @@ async def _do_hial_compute(
     overrides = _collect_overrides()
     hial_cfg  = overrides.get("high_altitude_aerosol", {})
     H_m       = float(hial_cfg.get("height_m", 20000.0))
-    n0_cm3    = float(hial_cfg.get("n0_cm3",   7.776356e2))
+    n0_cm3    = float(hial_cfg.get("n0_cm3",   6.66e3))
     profile   = overrides.get("profile", {})
     noise_cfg = overrides.get("instrument", {}).get("receiver_noise", {})
     cli_cfg   = overrides.get("cli", {})
@@ -1227,7 +1226,7 @@ async def _do_hial_compute(
     # ── 缓存查找 ──────────────────────────────────────────────────────────
     key = _hial_semantic_key(H_m, n0_cm3, sys_c, profile, noise_cfg, wl_nm)
     if _hial_find_entry(key) is not None and _hial_restore_from_cache(key):
-        _finish(f"缓存命中  H={H_m:.0f}m  n₀={n0_cm3:.3e} cm⁻³")
+        _finish(f"缓存命中  H={H_m:.0f}m  N₀={n0_cm3:.3e} cm⁻³")
         return
 
     from path_resolver import resolve_mie_python_executable
@@ -1281,7 +1280,7 @@ async def _do_hial_compute(
             _hial_store_result(key, H_m, n0_cm3)
         except Exception:
             pass
-        _finish(f"计算完成  H={H_m:.0f}m  n₀={n0_cm3:.3e} cm⁻³")
+        _finish(f"计算完成  H={H_m:.0f}m  N₀={n0_cm3:.3e} cm⁻³")
     else:
         _finish(f"计算失败（返回码 {rc}）", ok=False)
 
@@ -1297,7 +1296,7 @@ def highalt_tab() -> None:
                 compute_btn = ui.button("▶ 计算", icon="play_arrow").props("dense").classes(
                     "text-sm font-semibold bg-purple-700 text-white"
                 )
-                status_lbl = ui.label("就绪 — 在左侧输入 H 和 n₀ 后点击计算").classes(
+                status_lbl = ui.label("就绪 — 在左侧输入 H 和 N₀ 后点击计算").classes(
                     "text-xs text-gray-500"
                 )
             with ui.row().classes("items-center gap-2 mt-2 flex-wrap"):
@@ -1306,11 +1305,6 @@ def highalt_tab() -> None:
                 hist_select = ui.select({}, value=None).props("dense outlined options-dense").classes(
                     "text-xs min-w-64"
                 )
-            with ui.row().classes("items-start gap-1 mt-1"):
-                ui.icon("info", size="xs").classes("text-gray-400 mt-0.5")
-                ui.label(
-                    "均匀层模型：P(R) 与 SNR 的物理意义与分层大气不同，不可直接类比"
-                ).classes("text-xs text-gray-400")
 
         # ── 功率曲线 ─────────────────────────────────────────────────────
         log_state = [True]
@@ -1747,7 +1741,7 @@ def _build_profile_editor(g: dict) -> None:
 def _build_highalt_editor(g: dict) -> None:
     hial = g.get("high_altitude_aerosol", {}) if isinstance(g, dict) else {}
     _num("H  (m)",      hial.get("height_m", 20000.0),    ("high_altitude_aerosol", "height_m"),  fmt="%.1f")
-    _num("n₀  (cm⁻³)", hial.get("n0_cm3",   7.776356e2),  ("high_altitude_aerosol", "n0_cm3"),   fmt="%.6e")
+    _num("N₀  (cm⁻³)", hial.get("n0_cm3",   6.66e3),  ("high_altitude_aerosol", "n0_cm3"),   fmt="%.6e")
 
 
 def _build_fog_editor(key: str, spec: dict) -> None:
@@ -3083,13 +3077,6 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
             ui.label("修改后点击「重算」生效").classes("text-xs text-amber-600 italic mb-1")
             _build_global_editor(g)
 
-        with ui.expansion("分层大气", icon="layers").classes("w-full"):
-            ui.label("分层模式会额外生成剖面与分层回波图").classes("text-xs text-amber-600 italic mb-1")
-            _build_profile_editor(g)
-
-        with ui.expansion("高空低气溶胶浓度", icon="air").classes("w-full"):
-            _build_highalt_editor(g)
-
         # ── 场景参数（逐条展开，可编辑） ───────────────────────────────────
         FOG_SCENARIOS  = [("radiation_fog","辐射雾"), ("advection_fog","平流雾")]
         HAZE_SCENARIOS = [("urban_industrial_haze","城市/工业型霾"),
@@ -3098,11 +3085,7 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                           ("maritime_haze","海洋性霾")]
         RAIN_SCENARIOS = [("light_rain","小雨"),("moderate_rain","中雨"),("heavy_rain","大雨")]
 
-        for cat, cat_icon, cat_label, scenes in [
-            ("fog",  "water_drop", "雾 — 场景参数",  FOG_SCENARIOS),
-            ("haze", "blur_on",    "霾 — 场景参数",  HAZE_SCENARIOS),
-            ("rain", "grain",      "雨 — 场景参数",  RAIN_SCENARIOS),
-        ]:
+        def _render_scene_category(cat: str, cat_icon: str, cat_label: str, scenes: list) -> None:
             cat_data = summary.get(cat, {})
             with ui.expansion(cat_label, icon=cat_icon).classes("w-full"):
                 for key, label in scenes:
@@ -3137,6 +3120,19 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
                         elif cat == "rain":
                             rain_spec = spec if spec else _DEFAULTS["rain"].get(key, {})
                             _build_rain_editor(key, rain_spec)
+
+        # 左侧分区顺序与右侧标签页保持一致：雾 → 雨 → 高空 → 霾 → 分层大气
+        _render_scene_category("fog",  "water_drop", "雾 — 场景参数", FOG_SCENARIOS)
+        _render_scene_category("rain", "grain",      "雨 — 场景参数", RAIN_SCENARIOS)
+
+        with ui.expansion("高空低气溶胶浓度", icon="air").classes("w-full"):
+            _build_highalt_editor(g)
+
+        _render_scene_category("haze", "blur_on",    "霾 — 场景参数", HAZE_SCENARIOS)
+
+        with ui.expansion("分层大气", icon="layers").classes("w-full"):
+            ui.label("分层模式会额外生成剖面与分层回波图").classes("text-xs text-amber-600 italic mb-1")
+            _build_profile_editor(g)
 
         # ── 重算控制区 ────────────────────────────────────────────────────
         ui.separator()
