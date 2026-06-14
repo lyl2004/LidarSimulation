@@ -1201,7 +1201,7 @@ async def _do_hial_compute(
     overrides = _collect_overrides()
     hial_cfg  = overrides.get("high_altitude_aerosol", {})
     H_m       = float(hial_cfg.get("height_m", 20000.0))
-    n0_cm3    = float(hial_cfg.get("n0_cm3",   6.66e3))
+    n0_cm3    = float(hial_cfg.get("n0_cm3",   0.321709))
     profile   = overrides.get("profile", {})
     noise_cfg = overrides.get("instrument", {}).get("receiver_noise", {})
     cli_cfg   = overrides.get("cli", {})
@@ -1741,7 +1741,7 @@ def _build_profile_editor(g: dict) -> None:
 def _build_highalt_editor(g: dict) -> None:
     hial = g.get("high_altitude_aerosol", {}) if isinstance(g, dict) else {}
     _num("H  (m)",      hial.get("height_m", 20000.0),    ("high_altitude_aerosol", "height_m"),  fmt="%.1f")
-    _num("N₀  (cm⁻³)", hial.get("n0_cm3",   6.66e3),  ("high_altitude_aerosol", "n0_cm3"),   fmt="%.6e")
+    _num("N₀  (cm⁻³)", hial.get("n0_cm3",   0.321709),  ("high_altitude_aerosol", "n0_cm3"),   fmt="%.6e")
 
 
 def _build_fog_editor(key: str, spec: dict) -> None:
