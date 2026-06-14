@@ -124,12 +124,16 @@
     }
   },
   "profile": {
-    "mode": "uniform",
+    "mode": "ideal_layered",
     "aerosol_boundary_beta0_m_inv_sr": 2.47e-06,
     "aerosol_boundary_scale_height_m": 2000.0,
     "aerosol_layer_beta0_m_inv_sr": 5.13e-09,
     "aerosol_layer_center_m": 20000.0,
     "aerosol_layer_width_m": 6000.0,
     "aerosol_lidar_ratio_sr": 50.0
+  },
+  "high_altitude_aerosol": {
+    "height_m": 20000.0,
+    "n0_cm3": 6660.0
   }
 }

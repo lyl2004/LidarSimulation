@@ -189,8 +189,8 @@ def cn_scenario_title(key: str, fallback: str) -> str:
 
 
 def molecular_backscatter_reference(beta_mol_input: float) -> float:
-    """Convert standard molecular beta [m^-1 sr^-1] to the 1D qback reference."""
-    return float(4.0 * math.pi * float(beta_mol_input))
+    """BETA_MOL 已是标准 m^-1 sr^-1，与粒子 beta 同口径，无需再乘 4pi。"""
+    return float(beta_mol_input)
 
 
 def spectral_integral(y: np.ndarray, x: np.ndarray) -> float:
@@ -400,8 +400,12 @@ def cross_sections_for_grid(
         qext, qback = mie_efficiencies(round(float(r_um), 8), float(m_real), m_imag_abs)
         area = math.pi * (float(r_um) * 1.0e-6) ** 2
         sigma_ext[i] = qext * area
-        # The PDF's Eq. (8) uses Qback*pi*r^2 directly for beta.
-        sigma_back[i] = qback * area
+        # 体后向散射系数 beta 的量纲为 m^-1 sr^-1（每球面度）。
+        # Mie 的后向散射截面 C_back = Qback*pi*r^2 定义已含 4pi
+        # （C_back = 4*pi * dsigma/dOmega|_180），故需除以 4pi 才是
+        # 激光雷达方程所需的单位立体角后向散射截面。与 Julia T-matrix
+        # 路径 (iitm_physics.jl: sigma_sca/(4pi)*phase_m11_back) 口径一致。
+        sigma_back[i] = qback * area / (4.0 * math.pi)
     return sigma_ext, sigma_back
 
 

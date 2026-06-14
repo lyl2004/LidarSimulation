@@ -59,29 +59,33 @@ from lidar_profile_solver import solve_power_from_profile               # noqa: 
 # 高空气溶胶等效谱参数
 #
 # 选型依据：要求与分层大气模型的气溶胶激光雷达比 S=50 sr 严格一致（α、β 同时
-# 零偏差）。分层大气的 S=50 sr 是经验假设值，对应高空吸收性传输层气溶胶
-# （黑碳/烟尘老化层），折射率取 Bond & Bergstrom (2006) 综述的黑碳典型值
-# m≈1.6+0.3i（近红外）。在该折射率与 σ_g=1.6 下，反求中值半径 r_g 使球形
-# Mie 计算的 S 恰为 50.0 sr —— 因此这是一组“等效谱”，r_g 为标定量而非
-# 直接文献值；折射率与谱宽取自文献。详见 REFERENCE_CALIBRATION。
+# 零偏差）。分层大气的 S=50 sr 是经验假设值，对应平流层背景气溶胶
+# （Junge 层硫酸盐/水溶性液滴），折射率取近红外弱吸收典型值 m≈1.43+1e-7i。
+# 在该折射率与 σ_g=1.6 下，反求中值半径 r_g 使球形 Mie 计算的 S 恰为 50.0 sr
+# —— 因此这是一组“等效谱”，r_g 为标定量而非直接文献值；折射率与谱宽取自文献。
+#
+# 注：后向散射截面已统一为单位立体角口径（Qback*πr²/4π，与主引擎一致）。
+# 强吸收黑碳 m=1.6+0.3i 的真实雷达比在 1550nm 高达数百 sr，无法匹配 S=50sr；
+# 故改用弱吸收硫酸盐折射率，使真实 Mie 雷达比落回 50sr。详见 REFERENCE_CALIBRATION。
 # ---------------------------------------------------------------------------
 STRAT_AEROSOL = {
-    "rg_um":   0.025640,  # 标定量：使 Mie S=50.0 sr（σ_g、m 固定时唯一确定）
-    "sigma_g": 1.6,       # 几何标准差（黑碳/烟尘老化层典型谱宽）
-    "m_real":  1.6,       # 折射率实部（黑碳，1550nm，Bond & Bergstrom 2006）
-    "m_imag":  0.3,       # 折射率虚部（强吸收）
+    "rg_um":   0.234904,  # 标定量兜底值：使 Mie S=50.0 sr @532nm（运行时按波长重标）
+    "sigma_g": 1.6,       # 几何标准差（平流层背景气溶胶典型谱宽）
+    "m_real":  1.43,      # 折射率实部（硫酸盐/水溶性气溶胶，近红外，弱吸收）
+    "m_imag":  1.0e-7,    # 折射率虚部（弱吸收，平流层 Junge 层硫酸盐液滴）
     "r_min_um": 0.005,
-    "r_max_um": 0.5,
+    "r_max_um": 2.0,      # 覆盖 rg≈0.23μm 对数正态谱完整尾部
 }
 
 # ---------------------------------------------------------------------------
-# 文献对齐基准（手动标定，2026-06-13）
+# 文献对齐基准（手动标定，2026-06-14 统一 4π 口径后按 532nm 用例重标定）
 # 取 H=20000m（分层大气高斯峰中心），等效谱使 Mie 的 S=50.0 sr，
 # 因此在该高度 alpha 与 beta 同时与分层大气解析值零偏差。
 # ---------------------------------------------------------------------------
 REFERENCE_CALIBRATION = {
     "H_m":              20000.0,
-    "n0_cm3":           7.776356e+02,
+    "wavelength_nm":    532.0,
+    "n0_cm3":           0.321709,
     "beta_target":      5.242138e-09,
     "beta_mie":         5.242138e-09,
     "alpha_mie":        2.621069e-07,
@@ -91,12 +95,13 @@ REFERENCE_CALIBRATION = {
     "alpha_deviation_pct": 0.0,
     "beta_deviation_pct":  0.0,
     "note": (
-        "等效谱标定：σ_g=1.6、m=1.6+0.3i 固定，反求 r_g=0.025640μm 使 Mie 的 "
-        "S=50.0sr，与分层大气经验 S 严格一致；H=20000m 处 n0=777.6 cm^-3 使 "
-        "alpha、beta 同时与分层大气解析值零偏差。r_g 为标定量（非直接文献值），"
-        "折射率与谱宽取自黑碳/烟尘文献。"
+        "等效谱标定（统一 4π 口径后，532nm 用例）：σ_g=1.6、m=1.43+1e-7i（弱吸收硫酸盐）"
+        "固定，反求 r_g=0.234904μm 使 Mie 的 S=50.0sr，与分层大气经验 S 严格一致；"
+        "H=20000m 处 n0=0.3217 cm^-3 使 alpha、beta 同时与分层大气解析值零偏差。"
+        "r_g 与 n0 均为标定量（非直接文献值，n0 为等效谱数浓度而非真实物理浓度），"
+        "折射率与谱宽取自平流层硫酸盐气溶胶文献。r_g 随波长在运行时重标。"
     ),
-    "reference": "Bond & Bergstrom 2006, Aerosol Sci. Technol. 40(1); S=50sr 对齐分层大气经验模型",
+    "reference": "硫酸盐/水溶性气溶胶近红外折射率 m≈1.43-1e-7i; S=50sr 对齐分层大气经验模型",
 }
 
 # ---------------------------------------------------------------------------
@@ -160,7 +165,10 @@ def _mie_cross_sections(radius_um: np.ndarray, m_real: float, m_imag: float,
         )
         area = math.pi * (float(r) * 1e-6) ** 2
         sigma_ext[i]  = qext  * area
-        sigma_back[i] = qback * area
+        # 体后向散射系数 beta 为单位立体角量 (m^-1 sr^-1)；Mie 的 C_back=Qback*pi*r^2
+        # 已含 4pi，须除以 4pi。与主引擎 lidar_1d_simulation.cross_sections_for_grid
+        # 及 Julia T-matrix (iitm_physics.jl) 口径统一。
+        sigma_back[i] = qback * area / (4.0 * math.pi)
     return sigma_ext, sigma_back
 
 
@@ -184,26 +192,51 @@ def _S_of_rg(rg_um: float, wavelength_nm: float) -> float:
 
 
 def calibrate_rg_for_S(wavelength_nm: float, target_S: float = 50.0,
-                       rg_lo: float = 0.002, rg_hi: float = 0.20,
-                       iters: int = 50) -> float:
-    """二分求解中值半径 r_g，使等效谱在给定波长下的 Mie 激光雷达比 S=target_S。
+                       rg_lo: float = 0.002, rg_hi: float = 1.0,
+                       iters: int = 60) -> float:
+    """求解中值半径 r_g，使等效谱在给定波长下的 Mie 激光雷达比 S=target_S。
 
-    S(r_g) 在该谱型下随 r_g 单调递减（小粒子瑞利区 S 大，增大后趋近几何区）。
-    与分层大气对所有波长假设的气溶胶 S=50sr 对齐，使任意波长下气溶胶 α、β
-    都能与分层大气在 H 处零偏差。
+    重要：S(r_g) 并非单调函数。实测在该硫酸盐谱下 S(r_g) 呈单峰形（小粒子瑞利
+    区 S 低，中段 r_g≈0.1μm 处达峰，大粒子段又下降），故 S=target 一般有两个根。
+    我们取**峰右侧下降段**的根（大粒子、低 S 一侧），物理上更贴合平流层背景气溶胶。
+
+    算法：先在对数 r_g 网格上粗扫定位峰值位置，再在 [r_peak, rg_hi] 单调下降段
+    二分。若该段无法括住 target（峰值 < target，物理上不可达），回退兜底值。
     """
-    S_lo = _S_of_rg(rg_lo, wavelength_nm)
-    S_hi = _S_of_rg(rg_hi, wavelength_nm)
-    if not (S_hi < target_S < S_lo):
-        # 未括住目标：回退到 1550nm 标定值，避免崩溃（极端波长边界）
-        print(f"[warn] r_g 标定未括住 S={target_S}（S∈[{S_hi:.2f},{S_lo:.2f}] "
-              f"@ {wavelength_nm}nm），回退 r_g={STRAT_AEROSOL['rg_um']}")
+    RG_FLOOR, RG_CEIL = 1.0e-4, 2.0  # r_g 物理安全边界 (um)
+    rg_hi = min(rg_hi, RG_CEIL)
+    rg_lo = max(rg_lo, RG_FLOOR)
+
+    # 粗扫对数网格，定位 S(r_g) 峰值
+    grid = np.geomspace(rg_lo, rg_hi, 60)
+    s_vals = np.array([_S_of_rg(float(rg), wavelength_nm) for rg in grid])
+    peak_idx = int(np.argmax(s_vals))
+    s_peak = float(s_vals[peak_idx])
+
+    if s_peak < target_S:
+        # 峰值都达不到 target：该波长/谱型物理上不可达，回退兜底
+        print(f"[warn] r_g 标定：S 峰值 {s_peak:.2f} < 目标 {target_S} "
+              f"@ {wavelength_nm}nm（r_g∈[{rg_lo:.4f},{rg_hi:.4f}]），回退 r_g={STRAT_AEROSOL['rg_um']}")
         return float(STRAT_AEROSOL["rg_um"])
-    lo, hi = rg_lo, rg_hi
+
+    # 在峰右侧下降段二分：lo=峰位置(S≥target)，hi=右端(S<target)
+    lo = float(grid[peak_idx])
+    hi = rg_hi
+    if _S_of_rg(hi, wavelength_nm) > target_S:
+        # 右端 S 仍 > target：下降段不够长，向上扩 hi 直到 S<target 或触顶
+        steps = 0
+        while _S_of_rg(hi, wavelength_nm) > target_S and hi < RG_CEIL and steps < 40:
+            hi = min(hi * 1.3, RG_CEIL)
+            steps += 1
+        if _S_of_rg(hi, wavelength_nm) > target_S:
+            print(f"[warn] r_g 标定：下降段在边界内未降到 {target_S} "
+                  f"@ {wavelength_nm}nm，回退 r_g={STRAT_AEROSOL['rg_um']}")
+            return float(STRAT_AEROSOL["rg_um"])
+
     for _ in range(iters):
         mid = 0.5 * (lo + hi)
         if _S_of_rg(mid, wavelength_nm) > target_S:
-            lo = mid
+            lo = mid  # S 随 r_g 在此段单调降，S>target 说明 r_g 偏小
         else:
             hi = mid
     return 0.5 * (lo + hi)
@@ -505,8 +538,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--output",          required=True,  help="输出目录")
     p.add_argument("--height-m",        type=float, default=20000.0, help="气溶胶高度 H (m)")
-    p.add_argument("--n0-cm3",          type=float, default=6.66e3,
-                   help="粒子数密度 n0 (cm^-3)，默认为用例5基准值（532nm）")
+    p.add_argument("--n0-cm3",          type=float, default=0.321709,
+                   help="粒子数密度 n0 (cm^-3)，默认为用例5复现基准值（532nm, H=20km, 复现分层大气）")
     p.add_argument("--calibrate-n0",    action="store_true",
                    help="自动标定 n0 使气溶胶 beta 在 H 处与分层大气零偏差（任意波长）")
     p.add_argument("--range-max-m",     type=float, default=2000.0)

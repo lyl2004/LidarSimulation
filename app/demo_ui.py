@@ -60,9 +60,9 @@ HIAL_MANIFEST  = HIAL_CACHE_DIR / "manifest.json"
 # 文献对齐种子基准（与 high_altitude_aerosol.py 的 REFERENCE_CALIBRATION 保持一致）
 HIAL_SEED = {
     "height_m": 20000.0,
-    "n0_cm3":   6.66e3,
+    "n0_cm3":   0.321709,
     "wavelength_nm": 532.0,
-    "label":    "用例5 高空低气溶胶 (532nm, H=20km, N0=6.66e3)",
+    "label":    "用例5 高空低气溶胶 (532nm, H=20km, N0=0.3217 复现分层大气)",
 }
 HIAL_MAX_HISTORY = 10
 HISTORY_DIR = cache_runtime.LAYOUT.history_root

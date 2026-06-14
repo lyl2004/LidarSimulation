@@ -30,6 +30,11 @@ WAVELENGTH_NM = 1550.0
 ALPHA_MOL = 1.6e-7
 BETA_MOL = 1.9e-8
 
+# 后向散射系数公式版本。粒子 sigma_back 与分子项口径变更（去掉多余的 4pi）
+# 会改变所有 beta 数值，但不改变 cache key 的物理参数；显式纳入此版本号，
+# 使旧口径缓存自动失效，避免改公式后命中旧 beta。
+BETA_CONVENTION_VERSION = 2
+
 LIDAR_P0_W = 50.0
 LIDAR_C_M_S = 3.0e8
 LIDAR_PULSE_WIDTH_S = 2.0e-7
@@ -299,6 +304,7 @@ def fog_cache_key(fog_specs: list[FogSpec], args: argparse.Namespace) -> str:
         "beta_mol_input_m_inv_sr": _resolve_beta_mol(args),
         "beta_mol_internal_qback_reference_m_inv": _resolve_beta_mol_internal(args),
         "molecular_depol_ratio": args.molecular_depol_ratio,
+        "beta_convention_version": BETA_CONVENTION_VERSION,
     }
     return _sha256_json(payload)
 
@@ -317,6 +323,7 @@ def haze_cache_key(haze_specs: list[HazeSpec], args: argparse.Namespace) -> str:
         "beta_mol_input_m_inv_sr": _resolve_beta_mol(args),
         "beta_mol_internal_qback_reference_m_inv": _resolve_beta_mol_internal(args),
         "molecular_depol_ratio": args.molecular_depol_ratio,
+        "beta_convention_version": BETA_CONVENTION_VERSION,
     }
     return _sha256_json(payload)
 
@@ -352,6 +359,7 @@ def rain_cache_key(rain_specs: list[RainSpec], args: argparse.Namespace) -> str:
         "beta_mol_input_m_inv_sr": _resolve_beta_mol(args),
         "beta_mol_internal_qback_reference_m_inv": _resolve_beta_mol_internal(args),
         "molecular_depol_ratio": args.molecular_depol_ratio,
+        "beta_convention_version": BETA_CONVENTION_VERSION,
     }
     return _sha256_json(payload)
 
