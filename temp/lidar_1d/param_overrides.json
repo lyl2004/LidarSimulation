@@ -134,6 +134,6 @@
   },
   "high_altitude_aerosol": {
     "height_m": 20000.0,
-    "n0_cm3": 6660.0
+    "n0_cm3": 0.321709
   }
 }

@@ -25,7 +25,7 @@ param(
     [string]$AppVersion = "1.0",
     # 打包携带的历史记录列表（逗号分隔的 run_id:显示名 对，显示名可省略）
     # 格式示例: "run_20260613_230815:分层大气-532nm-30km"
-    [string]$PackagedHistoryEntries = "run_20260613_230815:分层大气-532nm-30km (用例4)",
+    [string]$PackagedHistoryEntries = "run_20260614_161526:分层大气-532nm-30km (用例4)",
     [switch]$Repack,
     [switch]$CleanBuild
 )
