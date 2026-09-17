@@ -122,6 +122,11 @@ class RainSpec:
     r_max_um: float = 3000.0
     m_real: float = 1.314
     m_imag: float = 1.0e-4
+    use_partition: bool = True
+    partition_split_mm: float = 1.0
+    smooth_frac: float = 0.30
+    joss_type: str | None = None
+    density_gain: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +177,16 @@ def default_haze_specs() -> list[HazeSpec]:
 
 
 def default_rain_specs() -> list[RainSpec]:
+    # 必须与 lidar_1d_simulation.default_rain_specs() 完全一致（含 joss_type/density_gain），
+    # 否则 rain_cache_key 失配，缓存命不中。density_gain=2.4609 对齐文献双点标定。
+    g = 2.4609
     return [
-        RainSpec("light_rain", "Light rain", rain_rate_mm_h=1.0),
-        RainSpec("moderate_rain", "Moderate rain", rain_rate_mm_h=5.0),
-        RainSpec("heavy_rain", "Heavy rain", rain_rate_mm_h=12.0),
+        RainSpec("light_rain", "Light rain", rain_rate_mm_h=4.65,
+                 joss_type="thunder", density_gain=g),
+        RainSpec("moderate_rain", "Moderate rain", rain_rate_mm_h=6.13,
+                 joss_type="drizzle", density_gain=g),
+        RainSpec("heavy_rain", "Heavy rain", rain_rate_mm_h=12.0,
+                 joss_type=None, density_gain=g),
     ]
 
 

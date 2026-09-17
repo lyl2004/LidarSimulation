@@ -102,7 +102,7 @@
   },
   "cli": {
     "wavelength-nm": 1550.0,
-    "range-max-m": 2000.0,
+    "range-max-m": 30000.0,
     "range-step-m": 1.0,
     "alpha-mol": 1.6e-07,
     "beta-mol": 1.9e-08,

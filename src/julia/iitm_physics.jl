@@ -220,7 +220,7 @@ end
 
 function validate_tm_result(sigma_ext::Float64, sigma_sca::Float64, g_val::Float64,
                             angles_deg::Vector{Float64}, M11::Vector{Float64},
-                            M12::Vector{Float64}, M33::Vector{Float64},
+                            M12::Vector{Float64}, M22::Vector{Float64}, M33::Vector{Float64},
                             M34::Vector{Float64})
     reasons = String[]
 
@@ -238,7 +238,7 @@ function validate_tm_result(sigma_ext::Float64, sigma_sca::Float64, g_val::Float
         push!(reasons, "g_out_of_range")
     end
 
-    for (name, arr) in [("M11", M11), ("M12", M12), ("M33", M33), ("M34", M34)]
+    for (name, arr) in [("M11", M11), ("M12", M12), ("M22", M22), ("M33", M33), ("M34", M34)]
         any(x -> !isfinite(x), arr) && push!(reasons, "$(name)_nonfinite")
     end
 
@@ -262,9 +262,10 @@ function extract_scatter_fields(T_matrix, lambda_um::Float64, angles_deg::Vector
     F = scattering_matrix(T_matrix, lambda_um, angles_deg)
     M11 = Float64.(real.(F[:, 1]))
     M12 = Float64.(real.(F[:, 2]))
+    M22 = Float64.(real.(F[:, 3]))
     M33 = Float64.(real.(F[:, 4]))
     M34 = Float64.(real.(F[:, 5]))
-    return M11, M12, M33, M34
+    return M11, M12, M22, M33, M34
 end
 
 function cone_average_metric(angles_deg::Vector{Float64}, values::Vector{Float64},
@@ -282,12 +283,12 @@ function cone_average_metric(angles_deg::Vector{Float64}, values::Vector{Float64
     return trapz(value_sel .* sin.(theta_sel), theta_sel) / denom
 end
 
-function safe_depol_ratio(M11::Float64, M12::Float64)
-    denom = M11 + M12
+function safe_depol_ratio(M11::Float64, M22::Float64)
+    denom = M11 + M22
     if !isfinite(denom) || abs(denom) <= 1e-20
         return 0.0
     end
-    ratio = (M11 - M12) / denom
+    ratio = (M11 - M22) / denom
     if !isfinite(ratio)
         return 0.0
     end
@@ -306,9 +307,9 @@ function finalize_single_particle_result(T_matrix, lambda_um::Float64, shape_typ
     sigma_ext = Float64(real(Cext_um2)) * UM2_TO_M2
     g_float   = Float64(real(g_val))
 
-    M11, M12, M33, M34 = extract_scatter_fields(T_matrix, lambda_um, angles_deg)
+    M11, M12, M22, M33, M34 = extract_scatter_fields(T_matrix, lambda_um, angles_deg)
     ok, reason = validate_tm_result(sigma_ext, sigma_sca, g_float, angles_deg, M11, M12,
-                                    M33, M34)
+                                    M22, M33, M34)
     if !ok
         error("$(solver_used) result invalid: $reason")
     end
@@ -323,6 +324,7 @@ function finalize_single_particle_result(T_matrix, lambda_um::Float64, shape_typ
             diagnostics = diagnostics,
             M11        = M11,
             M12        = M12,
+            M22        = M22,
             M33        = M33,
             M34        = M34)
 end
@@ -590,6 +592,7 @@ function compute_scatter_params(config::Dict)
     g_sum         = 0.0
     M11_sum = zeros(Float64, Nang)
     M12_sum = zeros(Float64, Nang)
+    M22_sum = zeros(Float64, Nang)
     M33_sum = zeros(Float64, Nang)
     M34_sum = zeros(Float64, Nang)
     valid_radii = Float64[]
@@ -599,6 +602,7 @@ function compute_scatter_params(config::Dict)
     g_sigma_sca_vals = Float64[]
     m11_vals = Vector{Vector{Float64}}()
     m12_vals = Vector{Vector{Float64}}()
+    m22_vals = Vector{Vector{Float64}}()
     m33_vals = Vector{Vector{Float64}}()
     m34_vals = Vector{Vector{Float64}}()
     valid_particles = 0
@@ -662,6 +666,7 @@ function compute_scatter_params(config::Dict)
         push!(g_sigma_sca_vals, res.g * res.sigma_sca)
         push!(m11_vals, res.M11)
         push!(m12_vals, res.M12)
+        push!(m22_vals, res.M22)
         push!(m33_vals, res.M33)
         push!(m34_vals, res.M34)
     end
@@ -677,6 +682,7 @@ function compute_scatter_params(config::Dict)
         g_sum         = w_valid[1] * g_sigma_sca_vals[1]
         M11_sum .= w_valid[1] * sigma_sca_vals[1] .* m11_vals[1]
         M12_sum .= w_valid[1] * sigma_sca_vals[1] .* m12_vals[1]
+        M22_sum .= w_valid[1] * sigma_sca_vals[1] .* m22_vals[1]
         M33_sum .= w_valid[1] * sigma_sca_vals[1] .* m33_vals[1]
         M34_sum .= w_valid[1] * sigma_sca_vals[1] .* m34_vals[1]
     else
@@ -692,6 +698,7 @@ function compute_scatter_params(config::Dict)
         for j in eachindex(M11_sum)
             M11_sum[j] = trapz([w_valid[i] * sigma_sca_vals[i] * m11_vals[i][j] for i in eachindex(r_valid)], r_valid)
             M12_sum[j] = trapz([w_valid[i] * sigma_sca_vals[i] * m12_vals[i][j] for i in eachindex(r_valid)], r_valid)
+            M22_sum[j] = trapz([w_valid[i] * sigma_sca_vals[i] * m22_vals[i][j] for i in eachindex(r_valid)], r_valid)
             M33_sum[j] = trapz([w_valid[i] * sigma_sca_vals[i] * m33_vals[i][j] for i in eachindex(r_valid)], r_valid)
             M34_sum[j] = trapz([w_valid[i] * sigma_sca_vals[i] * m34_vals[i][j] for i in eachindex(r_valid)], r_valid)
         end
@@ -699,7 +706,7 @@ function compute_scatter_params(config::Dict)
 
     if sigma_sca_eff > 1e-40
         inv_s = 1.0 / sigma_sca_eff
-        M11_sum .*= inv_s;  M12_sum .*= inv_s
+        M11_sum .*= inv_s;  M12_sum .*= inv_s;  M22_sum .*= inv_s
         M33_sum .*= inv_s;  M34_sum .*= inv_s
         g_eff = g_sum * inv_s
     else
@@ -710,10 +717,10 @@ function compute_scatter_params(config::Dict)
     norm_val = trapz(max.(M11_sum, 0.0) .* sin.(theta_r), theta_r)
     if norm_val > 1e-20
         f = 2.0 / norm_val
-        M11_sum .*= f;  M12_sum .*= f
+        M11_sum .*= f;  M12_sum .*= f;  M22_sum .*= f
         M33_sum .*= f;  M34_sum .*= f
     else
-        fill!(M11_sum, 1.0); fill!(M12_sum, 0.0)
+        fill!(M11_sum, 1.0); fill!(M12_sum, 0.0); fill!(M22_sum, 1.0)
         fill!(M33_sum, 0.0); fill!(M34_sum, 0.0)
     end
 
@@ -725,13 +732,13 @@ function compute_scatter_params(config::Dict)
     phase_m11_forward = forward_mode == "cone_avg" ?
                         cone_average_metric(angles_deg, M11_sum, forward_cone_deg) :
                         M11_sum[1]
-    depol_back = safe_depol_ratio(M11_sum[end], M12_sum[end])
+    depol_back = safe_depol_ratio(M11_sum[end], M22_sum[end])
     depol_forward = forward_mode == "cone_avg" ?
                     safe_depol_ratio(
                         cone_average_metric(angles_deg, M11_sum, forward_cone_deg),
-                        cone_average_metric(angles_deg, M12_sum, forward_cone_deg),
+                        cone_average_metric(angles_deg, M22_sum, forward_cone_deg),
                     ) :
-                    safe_depol_ratio(M11_sum[1], M12_sum[1])
+                    safe_depol_ratio(M11_sum[1], M22_sum[1])
 
     sigma_back_ref = sigma_sca_eff / (4pi) * phase_m11_back
     sigma_forward_ref = sigma_sca_eff / (4pi) * phase_m11_forward
@@ -756,6 +763,7 @@ function compute_scatter_params(config::Dict)
         "angles_deg"     => angles_deg,
         "M11"            => M11_sum,
         "M12"            => M12_sum,
+        "M22"            => M22_sum,
         "M33"            => M33_sum,
         "M34"            => M34_sum,
         "theta_rad_grid" => theta_grid,
@@ -2222,7 +2230,7 @@ end
   depol_ratio   Float32[N,N,N]  退偏场
   axis          Float32[N]      坐标轴 [L 单位，m]
   lut_back/lut_forward/lut_depol Float32[N]
-  angles_deg / M11 / M12 / M33 / M34 Float32[*]
+  angles_deg / M11 / M12 / M22 / M33 / M34 Float32[*]
   summary       Float32[6]      [sigma_back_ref, sigma_forward_ref, depol_back, depol_forward, forward_back_ratio(proxy), 0]
 """
 function save_field_npz(field::Dict, fields::Dict, scatter::Dict, output_dir::String)
@@ -2241,6 +2249,7 @@ function save_field_npz(field::Dict, fields::Dict, scatter::Dict, output_dir::St
         "angles_deg"    => Float32.(scatter["angles_deg"]),
         "M11"           => Float32.(scatter["M11"]),
         "M12"           => Float32.(scatter["M12"]),
+        "M22"           => Float32.(scatter["M22"]),
         "M33"           => Float32.(scatter["M33"]),
         "M34"           => Float32.(scatter["M34"]),
         "meta"          => Float32[L, field["dim"], 0.0],

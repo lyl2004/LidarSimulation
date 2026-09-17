@@ -178,12 +178,12 @@ def sigma_forward_reference(mie_res: MiePolarizedResult, forward_cone_deg: float
     return float(mie_res.sigma_sca * m11_forward / (4.0 * np.pi))
 
 
-def safe_depol_ratio(m11: float, m12: float) -> float:
-    """瀹夊叏璁＄畻 depol = (M11 - M12) / (M11 + M12)銆?"""
-    denom = float(m11 + m12)
+def safe_depol_ratio(m11: float, m22: float) -> float:
+    """Compute lidar linear depolarization from the backscatter diagonal terms."""
+    denom = float(m11 + m22)
     if not np.isfinite(denom) or abs(denom) <= 1e-20:
         return 0.0
-    ratio = float((m11 - m12) / denom)
+    ratio = float((m11 - m22) / denom)
     if not np.isfinite(ratio):
         return 0.0
     return min(max(ratio, 0.0), 1.0)
@@ -193,8 +193,10 @@ def mie_scatter_observables(mie_res: MiePolarizedResult, forward_cone_deg: float
     """浠?Mie 缁撴灉涓彁鍙栧墠鍚?鍚庡悜/閫€鍋忕瓑涓婂眰瑙傛祴閲忋€?"""
     phase_m11_back = interpolate_angular_table(mie_res.angles_deg, mie_res.M11, 180.0)
     phase_m11_forward = cone_average_metric(mie_res.angles_deg, mie_res.M11, forward_cone_deg)
-    phase_m12_back = interpolate_angular_table(mie_res.angles_deg, mie_res.M12, 180.0)
-    phase_m12_forward = cone_average_metric(mie_res.angles_deg, mie_res.M12, forward_cone_deg)
+    # Homogeneous spheres obey M22 == M11. M12 is an off-diagonal
+    # polarization term and cannot substitute for M22 in lidar depolarization.
+    phase_m22_back = phase_m11_back
+    phase_m22_forward = phase_m11_forward
 
     sigma_back_ref = sigma_backscatter_reference(mie_res)
     sigma_forward_ref = sigma_forward_reference(mie_res, forward_cone_deg=forward_cone_deg)
@@ -203,11 +205,13 @@ def mie_scatter_observables(mie_res: MiePolarizedResult, forward_cone_deg: float
     return {
         "phase_m11_back": float(phase_m11_back),
         "phase_m11_forward": float(phase_m11_forward),
+        "phase_m22_back": float(phase_m22_back),
+        "phase_m22_forward": float(phase_m22_forward),
         "sigma_back_ref": float(sigma_back_ref),
         "sigma_forward_ref": float(sigma_forward_ref),
         "forward_back_ratio": float(forward_back_ratio),
-        "depol_back": float(safe_depol_ratio(phase_m11_back, phase_m12_back)),
-        "depol_forward": float(safe_depol_ratio(phase_m11_forward, phase_m12_forward)),
+        "depol_back": float(safe_depol_ratio(phase_m11_back, phase_m22_back)),
+        "depol_forward": float(safe_depol_ratio(phase_m11_forward, phase_m22_forward)),
     }
 
 
