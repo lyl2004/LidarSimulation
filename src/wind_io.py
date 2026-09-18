@@ -5,7 +5,7 @@ import json
 import math
 from pathlib import Path
 
-ALGORITHM_VERSION = 'wind-receiver-3'
+ALGORITHM_VERSION = 'wind-receiver-4'
 MODES = {
     'unified_event_mode': '同一事件源（理想单距离）',
     'matlab_compat_raw': 'MATLAB 原始样例（独立于场景功率）',
@@ -18,28 +18,13 @@ SCENES = {
     'dust_desert_haze': '沙尘型霾', 'maritime_haze': '海洋性霾',
     'layered_atmosphere': '分层大气',
 }
-# First-order scene response model.  The width is the radial-velocity
-# standard deviation of scatterers inside one receive gate.  It broadens the
-# Doppler line without inventing a scene-dependent mean wind direction.
-SCENE_DOPPLER = {
-    'radiation_fog': dict(velocity_std_m_s=0.15),
-    'advection_fog': dict(velocity_std_m_s=0.25),
-    'light_rain': dict(velocity_std_m_s=0.45),
-    'moderate_rain': dict(velocity_std_m_s=0.75),
-    'heavy_rain': dict(velocity_std_m_s=1.10),
-    'urban_industrial_haze': dict(velocity_std_m_s=0.35),
-    'rural_continental_haze': dict(velocity_std_m_s=0.25),
-    'dust_desert_haze': dict(velocity_std_m_s=0.65),
-    'maritime_haze': dict(velocity_std_m_s=0.30),
-    'layered_atmosphere': dict(velocity_std_m_s=1.25),
-}
-DEFAULTS = dict(reference_mhz=80.0, velocity_m_s=0.0, lo_power_w=1e-10,
-                background_power_w=0.0, visibility=1.0, split=0.5,
-                dt_ns=0.5, window_ns=5000.0, prf_hz=10000.0, pulses=200,
-                efficiency=0.35, dead_ns=30.0, dark_hz=5.0,
-                afterpulse_probability=0.3, afterpulse_tau_ns=100.0,
-                max_lag_ns=500.0, seed=20260917, search_min_mhz=10.0,
-                search_max_mhz=210.0, min_snr_db=-6.0,
+DEFAULTS = dict(reference_mhz=80.0, velocity_m_s=5.0, lo_power_w=1e-10,
+                background_power_w=1e-12, visibility=1.0, split=0.5,
+                dt_ns=0.5, window_ns=200.0, prf_hz=1000.0, pulses=2000,
+                efficiency=0.6, dead_ns=10.0, dark_hz=100.0,
+                afterpulse_probability=0.01, afterpulse_tau_ns=50.0,
+                max_lag_ns=500.0, seed=20260917, search_min_mhz=20.0,
+                search_max_mhz=160.0, min_snr_db=-6.0,
                 wavelength_nm=1550.0, local_rate_hz=1e5,
                 signal_rate_hz=1e5)
 

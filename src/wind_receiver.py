@@ -5,7 +5,7 @@ import time
 import numpy as np
 
 from spad_detector import detect, positive_lag_histogram
-from wind_io import ALGORITHM_VERSION, DEFAULTS, SCENE_DOPPLER
+from wind_io import ALGORITHM_VERSION, DEFAULTS
 
 H = 6.62607015e-34
 C = 299792458.0
@@ -130,9 +130,7 @@ def simulate(source, settings, progress=None):
         raise ValueError('未知接收器模式')
     start = time.perf_counter()
     p, n, lag, dt, beat = validate(source, settings)
-    phase_rng, rng1, rng2, noise_rng, scene_rng = [
-        np.random.default_rng(s) for s in np.random.SeedSequence(p['seed']).spawn(5)
-    ]
+    phase_rng, rng1, rng2, noise_rng = [np.random.default_rng(s) for s in np.random.SeedSequence(p['seed']).spawn(4)]
     t = (np.arange(n) + 0.5) * dt
     eph = H * C / source['wavelength_m']
     signal = source['signal_power_w']
@@ -145,9 +143,6 @@ def simulate(source, settings, progress=None):
     histogram = np.zeros(lag + 1, dtype=np.int64)
     diagnostics = [dict(events=0, illuminated_events=0), dict(events=0, illuminated_events=0)]
     reference_mean = np.full(n, (p['lo_power_w'] + signal + p['background_power_w']) * dt / eph * p['split'])
-    scene_name = source.get('scene')
-    scene_model = SCENE_DOPPLER.get(scene_name, dict(velocity_std_m_s=0.0))
-    scene_velocity_std = float(scene_model['velocity_std_m_s'])
 
     def event_spectrum(events):
         train = np.zeros(n)
@@ -160,15 +155,9 @@ def simulate(source, settings, progress=None):
 
     for pulse in range(p['pulses']):
         phase = phase_rng.uniform(0, 2 * np.pi)
-        # A receive gate contains scatterers with a distribution of radial
-        # velocities.  Sampling one velocity per pulse is an efficient
-        # approximation to a broadened Doppler line and keeps photon-level
-        # detection unchanged.
-        pulse_velocity = p['velocity_m_s'] + scene_rng.normal(0.0, scene_velocity_std)
-        pulse_beat = p['reference_mhz'] * 1e6 + 2 * pulse_velocity / source['wavelength_m']
         # Exact integral of cosine per bin, rectangular echo limited to n*dt.
         mixed = np.full(n + lag, p['lo_power_w'] + p['background_power_w'], dtype=float)
-        mixed[:n] += signal + 2 * p['visibility'] * math.sqrt(p['lo_power_w'] * signal) * np.sinc(pulse_beat * dt) * np.cos(2*np.pi*pulse_beat*t + phase)
+        mixed[:n] += signal + 2 * p['visibility'] * math.sqrt(p['lo_power_w'] * signal) * np.sinc(beat * dt) * np.cos(2*np.pi*beat*t + phase)
         mean = np.maximum(mixed, 0) * dt / eph
         events = []
         for channel, (fraction, rng) in enumerate(((p['split'], rng1), (1-p['split'], rng2))):
@@ -214,10 +203,9 @@ def simulate(source, settings, progress=None):
                 diagnostics=dict(channels=diagnostics, elapsed_s=time.perf_counter()-start,
                                  photon_energy_j=eph, signal_photon_rate_hz=signal/eph,
                                  signal_mean_per_bin=signal*dt/eph,
-                                 scene_doppler_model=scene_model,
                                  effective_window_ns=n*p['dt_ns'], frequency_resolution_hz=1/(n*dt),
                                  velocity_resolution_m_s=source['wavelength_m']/(2*n*dt)),
                 conventions=dict(spectrum='mean-removed Hann, averaged per-pulse one-sided power; FFT of circular autocorrelation',
                                  snr='independent constant-light detector calibration; whitened peak search; local calibrated noise scaled by mean ratio outside +/-3 bins; 10log10((sum(peak +/-1 bin)-noise_band_power)/noise_band_power)',
                                  lag='t_ch1 - t_ch2; within each receive gate only',
-                                 model='ideal single range with scene-dependent radial-velocity broadening; LO/background continue through histogram tail; independent gates; no AP cascade; AP tails beyond gate discarded'))
+                                 model='ideal coherent single range; LO/background continue through histogram tail; independent gates; no AP cascade; AP tails beyond gate discarded'))
