@@ -5,10 +5,9 @@
 Left panel  : editable simulation parameters (instrument / global /
               per-scenario optical + particle-distribution specs)
               with a recompute control section at the bottom.
-Right panel : five tab groups, each with an interactive Plotly chart
-              (log/linear toggle, legend-click curve visibility),
-              a collapsible numerical-summary table, a collapsible
-              reference-image panel, and CSV download links.
+Right panel : wind retrieval by default; eight original result groups remain
+              available through the secondary multi-select, with their charts,
+              numerical summaries, reference images and CSV downloads intact.
 
 Run:
     pixi run -e gui python app/demo_ui.py
@@ -2917,7 +2916,7 @@ def _populate_inputs_from_summary(summary: dict) -> None:
 # Left panel
 # ---------------------------------------------------------------------------
 
-def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
+def build_left_panel(summary: dict, chart_refresh_callbacks: list, wind=None) -> None:
     g    = summary.get("global", {})
 
     with ui.column().classes("w-full gap-3"):
@@ -2931,11 +2930,27 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
             status_text = _recompute_status_text
             status_class = _recompute_status_class
 
+        # 原有控件只创建一次；二级入口仅改变显隐，不改变参数注册和回调。
+        with ui.expansion("仪器参数", icon="settings", value=True).classes("w-full"):
+            ui.label("修改后点击「重算」生效").classes("text-xs text-amber-600 italic mb-1")
+            _build_instrument_editor(g)
+        if wind is not None:
+            wind.build_inputs()
+        secondary = ui.select(
+            ["收起", "历史记录", "大气分子参数", "雾 — 场景参数", "雨 — 场景参数",
+             "高空低气溶胶浓度", "霾 — 场景参数", "分层大气"],
+            value="收起", label="其他输入与管理",
+        ).props("dense outlined").classes("w-full")
+
+        def secondary_section(label, icon):
+            return ui.expansion(label, icon=icon, value=True).classes("w-full").bind_visibility_from(
+                secondary, 'value', lambda value: value == label)
+
         # ── 历史记录选择器 ─────────────────────────────────────────────────
         hist_opts = _history_options()
         active_id = cache_runtime.get_active_view_id()
 
-        with ui.expansion("历史记录", icon="history", value=True).classes("w-full"):
+        with secondary_section("历史记录", "history"):
             hist_select = ui.select(
                 hist_opts or {},
                 value=active_id if active_id in hist_opts else (next(iter(hist_opts), None) if hist_opts else None),
@@ -3067,13 +3082,8 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
 
             hist_select.on_value_change(_on_history_change)
 
-        # ── 仪器参数（可编辑） ─────────────────────────────────────────────
-        with ui.expansion("仪器参数", icon="settings", value=True).classes("w-full"):
-            ui.label("修改后点击「重算」生效").classes("text-xs text-amber-600 italic mb-1")
-            _build_instrument_editor(g)
-
         # ── 全局计算参数（可编辑） ─────────────────────────────────────────
-        with ui.expansion("大气分子参数", icon="tune").classes("w-full"):
+        with secondary_section("大气分子参数", "tune"):
             ui.label("修改后点击「重算」生效").classes("text-xs text-amber-600 italic mb-1")
             _build_global_editor(g)
 
@@ -3087,7 +3097,7 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
 
         def _render_scene_category(cat: str, cat_icon: str, cat_label: str, scenes: list) -> None:
             cat_data = summary.get(cat, {})
-            with ui.expansion(cat_label, icon=cat_icon).classes("w-full"):
+            with secondary_section(cat_label, cat_icon):
                 for key, label in scenes:
                     sc   = cat_data.get(key, {})
                     spec = sc.get("spec", {})
@@ -3125,12 +3135,12 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
         _render_scene_category("fog",  "water_drop", "雾 — 场景参数", FOG_SCENARIOS)
         _render_scene_category("rain", "grain",      "雨 — 场景参数", RAIN_SCENARIOS)
 
-        with ui.expansion("高空低气溶胶浓度", icon="air").classes("w-full"):
+        with secondary_section("高空低气溶胶浓度", "air"):
             _build_highalt_editor(g)
 
         _render_scene_category("haze", "blur_on",    "霾 — 场景参数", HAZE_SCENARIOS)
 
-        with ui.expansion("分层大气", icon="layers").classes("w-full"):
+        with secondary_section("分层大气", "layers"):
             ui.label("分层模式会额外生成剖面与分层回波图").classes("text-xs text-amber-600 italic mb-1")
             _build_profile_editor(g)
 
@@ -3138,6 +3148,8 @@ def build_left_panel(summary: dict, chart_refresh_callbacks: list) -> None:
         ui.separator()
         with ui.column().classes("w-full gap-2"):
             ui.label("重算控制").classes("text-sm font-semibold text-gray-700")
+            if wind is not None:
+                wind.build_controls()
             status_label = ui.label(status_text).classes(status_class)
 
             precision_select = ui.select(
@@ -3528,6 +3540,10 @@ def index() -> None:
 
     # ── chart refresh callbacks (registered after right panel is built) ───
     chart_refresh_callbacks: list = []
+    from wind_ui import WindPanel
+    wind = WindPanel(ROOT, lambda: (_DATA_DIR(), _SUMMARY(), cache_runtime.get_active_view_id()),
+                     _log_buf, _ui_state.setdefault('wind', {}))
+    chart_refresh_callbacks.append(wind.refresh)
 
     # ── body: left + right（可水平拖拽分隔） ──────────────────────────────
     # ui.splitter 的分隔条可拖拽，用户手动调节左面板宽度即可避免长内容溢出。
@@ -3543,7 +3559,7 @@ def index() -> None:
                 "height:calc(100vh - 48px); background:#fff;"
                 "border-right:1px solid #e2e8f0;"
             ).classes("px-3 py-3 lidar-left-panel"):
-                build_left_panel(summary, chart_refresh_callbacks)
+                build_left_panel(summary, chart_refresh_callbacks, wind)
                 _diag_event("left_panel_built", timeline=_STARTUP_TIMELINE)
                 # Restore the active run's exact UI state from params.json so the
                 # startup path is identical to the history-switch path.  Without
@@ -3571,7 +3587,7 @@ def index() -> None:
             with ui.scroll_area().classes("px-5 py-4 lidar-right-panel").style(
                 "height:calc(100vh - 48px); background:#f1f5f9;"
             ):
-                _build_right_panel_with_refresh(summary, chart_refresh_callbacks)
+                _build_right_panel_with_refresh(summary, chart_refresh_callbacks, wind)
                 _diag_event("right_panel_built", timeline=_STARTUP_TIMELINE)
                 _diag_event("ui_ready", timeline=_STARTUP_TIMELINE)
                 _diag_update_gui_summary(
@@ -3583,64 +3599,56 @@ def index() -> None:
                 )
 
 
-def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
+def _build_right_panel_with_refresh(summary: dict, callbacks: list, wind=None) -> None:
     """Build right panel and register per-tab chart refresh callbacks."""
 
     # 恢复上次激活的标签页
     ui_state = _load_ui_state()
     last_active_tab = ui_state.get("active_tab")
 
-    with ui.tabs().classes(
-        "w-full bg-white rounded-lg shadow-sm sticky top-0 z-10"
-    ) as tabs:
-        t_fog       = ui.tab("雾 · 功率",        icon="water_drop")
-        t_rain      = ui.tab("雨 · 功率",        icon="grain")
-        t_highalt   = ui.tab("高空低气溶胶浓度",  icon="air")
-        t_haze      = ui.tab("霾 · 功率",        icon="blur_on")
-        t_depol     = ui.tab("霾 · 退偏",        icon="tune")
-        t_layered   = ui.tab("分层大气",          icon="layers")
-        t_snr       = ui.tab("信噪比",            icon="show_chart")
-        t_all       = ui.tab("全场景对比",         icon="compare_arrows")
+    t_fog, t_rain, t_highalt, t_haze = "雾 · 功率", "雨 · 功率", "高空低气溶胶浓度", "霾 · 功率"
+    t_depol, t_layered, t_snr, t_all = "霾 · 退偏", "分层大气", "信噪比", "全场景对比"
+    names = [t_fog, t_rain, t_highalt, t_haze, t_depol, t_layered, t_snr, t_all]
+    initial = '其他结果' if last_active_tab in names else last_active_tab
+    primary = ui.toggle(['风速', '其他结果'], value=initial if initial in ('风速', '其他结果') else '风速')
+    selected = _ui_state.setdefault('other_results', [last_active_tab] if last_active_tab in names else [])
 
-    # 记录标签页切换状态
-    tab_name_map = {
-        t_fog:     "雾 · 功率",
-        t_rain:    "雨 · 功率",
-        t_highalt: "高空低气溶胶浓度",
-        t_haze:    "霾 · 功率",
-        t_depol:   "霾 · 退偏",
-        t_layered: "分层大气",
-        t_snr:     "信噪比",
-        t_all:     "全场景对比",
-    }
+    def resize_charts():
+        ui.run_javascript("window.dispatchEvent(new Event('resize'))")
 
-    def _on_tab_change(e) -> None:
-        name = tab_name_map.get(e.value)
-        if name:
-            _save_ui_state(active_tab=name)
+    def change_primary(e):
+        _save_ui_state(active_tab=e.value)
+        ui.timer(0.15, resize_charts, once=True)
 
-    tabs.on_value_change(_on_tab_change)
+    primary.on_value_change(change_primary)
+    with ui.column().classes('w-full').bind_visibility_from(primary, 'value', lambda value: value == '风速'):
+        if wind is not None:
+            wind.build_results()
+        else:
+            ui.label('尚无测风结果')
+    checks = {}
+    with ui.expansion('选择其他结果（可多选）', icon='checklist').classes('w-full').bind_visibility_from(
+            primary, 'value', lambda value: value == '其他结果'):
+        for name in names:
+            checks[name] = ui.checkbox(name, value=name in selected)
 
-    # 设置初始激活标签页（如果上次不是在查看日志）
-    initial_tab = t_fog
-    if last_active_tab and last_active_tab != "log_view":
-        # 尝试匹配标签页名称
-        tab_map = {
-            "雾 · 功率":       t_fog,
-            "雨 · 功率":       t_rain,
-            "高空低气溶胶浓度": t_highalt,
-            "霾 · 功率":       t_haze,
-            "霾 · 退偏":       t_depol,
-            "分层大气":        t_layered,
-            "信噪比":          t_snr,
-            "全场景对比":      t_all,
-        }
-        initial_tab = tab_map.get(last_active_tab, t_fog)
+        def change_selection(_event):
+            _ui_state['other_results'] = [name for name, check in checks.items() if check.value]
+            ui.timer(0.15, resize_charts, once=True)
 
-    with ui.tab_panels(tabs, value=initial_tab).classes(
+        for check in checks.values():
+            check.on_value_change(change_selection)
+
+    def result_panel(name):
+        panel = ui.column().classes('w-full').bind_visibility_from(checks[name], 'value')
+        with panel:
+            ui.label(name).classes('text-lg font-semibold')
+        return panel
+
+    with ui.column().bind_visibility_from(primary, 'value', lambda value: value == '其他结果').classes(
         "w-full bg-white rounded-lg shadow-sm mt-2 p-5"
     ):
-        with ui.tab_panel(t_fog):
+        with result_panel(t_fog):
             chart_tab(
                 fig_builder=fig_fog_power,
                 allow_log=True, default_log=True,
@@ -3653,7 +3661,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                 callbacks=callbacks,
             )
 
-        with ui.tab_panel(t_rain):
+        with result_panel(t_rain):
             chart_tab(
                 fig_builder=fig_rain_power,
                 allow_log=True, default_log=True,
@@ -3667,10 +3675,10 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                 callbacks=callbacks,
             )
 
-        with ui.tab_panel(t_highalt):
+        with result_panel(t_highalt):
             highalt_tab()
 
-        with ui.tab_panel(t_haze):
+        with result_panel(t_haze):
             chart_tab(
                 fig_builder=fig_haze_power,
                 allow_log=True, default_log=True,
@@ -3691,7 +3699,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                 callbacks=callbacks,
             )
 
-        with ui.tab_panel(t_depol):
+        with result_panel(t_depol):
             chart_tab(
                 fig_builder=fig_haze_depol,
                 allow_log=False, default_log=False,
@@ -3712,10 +3720,10 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
                 callbacks=callbacks,
             )
 
-        with ui.tab_panel(t_layered):
+        with result_panel(t_layered):
             layered_tab(callbacks)
 
-        with ui.tab_panel(t_snr):
+        with result_panel(t_snr):
             with ui.card().classes("w-full p-4 shadow-none border"):
                 ui.label("全场景信噪比 SNR").classes("font-semibold text-sm text-gray-700 mb-2")
                 snr_plotly = ui.plotly(fig_all_snr()).classes("w-full").style("min-height:420px; overflow:hidden")
@@ -3764,7 +3772,7 @@ def _build_right_panel_with_refresh(summary: dict, callbacks: list) -> None:
 
             callbacks.append(redraw_snr)
 
-        with ui.tab_panel(t_all):
+        with result_panel(t_all):
             log_state_all = [True]
 
             with ui.card().classes("w-full p-4 shadow-none border"):

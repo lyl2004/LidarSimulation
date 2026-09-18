@@ -48,4 +48,5 @@ __pycache__/
 /temp/lidar_1d/param_overrides.json
 /temp/lidar_1d/run_history/
 /temp/lidar_1d/runtime_state/
+/temp/lidar_1d/wind_results/
 /temp/lidar_1d/test_suite_backup_*/
