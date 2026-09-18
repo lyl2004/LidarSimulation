@@ -8,7 +8,13 @@ import uuid
 from nicegui import ui
 
 from path_resolver import resolve_mie_python_executable
-from wind_io import DEFAULTS, SCENES, make_request, read_source
+from wind_io import DEFAULTS, SCENES, make_request, mode_defaults, read_source
+
+RECEIVER_MODE = 'matlab_compat_corrected'
+EDITABLE_INSTRUMENT_KEYS = (
+    'velocity_m_s', 'wavelength_nm', 'dt_ns', 'window_ns',
+    'local_rate_hz', 'signal_rate_hz', 'dead_ns',
+)
 
 
 class WindPanel:
@@ -24,30 +30,18 @@ class WindPanel:
         self.client.on_delete(self.cancel)
 
     def build_inputs(self):
-        with ui.expansion('测风接收机参数', icon='air', value=True).classes('w-full'):
-            ui.label('修改仪器参数后先“写入并重算”，再点击“计算测风”。').classes('text-xs text-amber-600 italic mb-1')
-            self.scene = ui.select(SCENES, value=self.state.get('scene', 'maritime_haze'), label='测风来源场景').props('dense outlined options-dense').classes('w-full text-sm')
+        with ui.expansion('测风仪器参数', icon='air', value=True).classes('w-full'):
+            self.scene = ui.select(SCENES, value=self.state.get('scene', 'maritime_haze'), label='大气类型').props('dense outlined options-dense').classes('w-full text-sm')
             self.distance = self._number('测量距离 (m)', self.state.get('distance', 1000), min=0)
             labels = {
                 'velocity_m_s': '设定径向速度 (m/s)',
-                'lo_power_w': '本振功率 (W)', 'reference_mhz': '参考频差 (MHz)',
-                'pulses': '累计脉冲数', 'window_ns': '有效接收窗口 (ns，不得超过脉宽)',
-                'dt_ns': '探测时间步长 (ns)', 'prf_hz': '脉冲重复频率 (Hz)',
-                'efficiency': 'SPAD 探测效率 (0～1)', 'dead_ns': '死时间 (ns)',
-                'dark_hz': '每通道暗计数率 (Hz)', 'background_power_w': '混频前总背景光功率 (W)',
-                'visibility': '干涉可见度 (0～1)', 'split': '通道 1 分光比例',
-                'afterpulse_probability': '后脉冲概率 (每次原生雪崩)',
-                'afterpulse_tau_ns': '后脉冲平均释放延迟 (ns)', 'max_lag_ns': '时间差上限 (ns)',
-                'search_min_mhz': '寻峰下限 (MHz)', 'search_max_mhz': '寻峰上限 (MHz)',
-                'min_snr_db': '有效测风最低谱 SNR (dB)', 'seed': '随机种子',
+                'wavelength_nm': '波长 (nm)', 'dt_ns': 'bin 宽度 (ns)',
+                'window_ns': '总时长 (ns)', 'local_rate_hz': '本振光子率 (Hz)',
+                'signal_rate_hz': '信号光子率 (Hz)', 'dead_ns': '死时间 (ns)',
             }
-            values = {**DEFAULTS, **self.state.get('settings', {})}
-            for key in ('velocity_m_s', 'lo_power_w', 'pulses'):
+            values = {**mode_defaults(RECEIVER_MODE), **self.state.get('settings', {})}
+            for key in EDITABLE_INSTRUMENT_KEYS:
                 self.inputs[key] = self._number(labels[key], values[key])
-            with ui.expansion('采样、探测器与寻峰设置', icon='tune').classes('w-full'):
-                for key, label in labels.items():
-                    if key not in self.inputs:
-                        self.inputs[key] = self._number(label, values[key])
             for control in [self.scene, self.distance, *self.inputs.values()]:
                 control.on_value_change(self.changed)
 
@@ -67,12 +61,14 @@ class WindPanel:
         self.status = ui.label('测风尚未运行').classes('text-xs text-gray-600')
 
     def settings(self):
-        return {key: control.value for key, control in self.inputs.items()}
+        return {**{key: control.value for key, control in self.inputs.items()},
+                'mode': RECEIVER_MODE}
 
     def request(self):
         data, summary, run_id = self.source_paths()
         source = read_source(data, summary, run_id, self.scene.value, self.distance.value)
-        return make_request(source, self.settings())
+        settings = self.settings()
+        return make_request(source, settings)
 
     def changed(self, _event=None):
         self.state.update(scene=self.scene.value, distance=self.distance.value, settings=self.settings())
@@ -80,8 +76,9 @@ class WindPanel:
             self.refresh()
 
     def reset(self):
-        for key, value in DEFAULTS.items():
-            self.inputs[key].value = value
+        for key, value in mode_defaults(RECEIVER_MODE).items():
+            if key in self.inputs:
+                self.inputs[key].value = value
         self.scene.value = 'maritime_haze'
         self.distance.value = 1000
         self.changed()

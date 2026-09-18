@@ -12,12 +12,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 from spad_detector import detect, positive_lag_histogram
-from wind_io import DEFAULTS, make_request, read_source
+from wind_io import DEFAULTS, make_request, mode_defaults, read_source
 from wind_receiver import estimate_spectrum, simulate, validate
+from wind_matlab_receiver import matlab_histogram, probability_fft
 
 
 def source(power=1e-10):
-    return dict(wavelength_m=1550e-9, pulse_width_s=200e-9,
+    return dict(wavelength_m=1550e-9, pulse_width_s=1e-6,
                 actual_range_m=1000.0, signal_power_w=power)
 
 
@@ -53,6 +54,53 @@ class DetectorTests(unittest.TestCase):
 
 
 class ReceiverTests(unittest.TestCase):
+    def test_mode_defaults_follow_sample_and_statistics_requirements(self):
+        self.assertEqual(mode_defaults('matlab_compat_raw')['window_ns'], 5000.0)
+        self.assertEqual(mode_defaults('matlab_compat_raw')['pulses'], 1)
+        self.assertEqual(mode_defaults('matlab_compat_corrected')['window_ns'], 1000.0)
+        self.assertEqual(mode_defaults('matlab_compat_corrected')['pulses'], 200)
+        with self.assertRaises(ValueError):
+            simulate(source(), dict(mode='matlab_compat_corrected', pulses=1))
+
+    def test_matlab_compatibility_modes_are_explicit_and_independent(self):
+        compat = simulate(source(), dict(mode='matlab_compat_corrected', pulses=32,
+                                         window_ns=1000, max_lag_ns=100))
+        self.assertEqual(compat['mode'], 'matlab_compat_corrected')
+        self.assertTrue(compat['event_chain']['independent_of_fft'])
+        self.assertTrue(compat['diagnostics']['source_power_used'])
+        self.assertEqual(len(compat['probability_chain']['p']), 2000)
+        raw = simulate(dict(wavelength_m=1550e-9, pulse_width_s=5e-6,
+                            actual_range_m=1000, signal_power_w=1e-10),
+                       dict(mode='matlab_compat_raw'))
+        self.assertEqual(raw['mode'], 'matlab_compat_raw')
+        self.assertFalse(raw['diagnostics']['source_power_used'])
+        self.assertIn('frozen MATLAB', raw['conventions']['input'])
+
+    def test_corrected_gate_does_not_scale_with_dark_prf_tail(self):
+        result = simulate(source(), dict(mode='matlab_compat_corrected', pulses=200,
+                                         max_lag_ns=100))
+        self.assertEqual(result['settings']['pulses'], 200)
+        self.assertLess(result['diagnostics']['effective_window_ns'],
+                        result['event_chain']['period_s'] * 1e9)
+        self.assertLess(result['diagnostics']['effective_noise_amp'],
+                        result['settings']['noise_amp'])
+        self.assertTrue(result['summary']['valid'], result['summary'])
+
+    def test_raw_event_histogram_keeps_matlab_fixed_beat(self):
+        src = dict(wavelength_m=1550e-9, pulse_width_s=5e-6,
+                   actual_range_m=1000, signal_power_w=1e-10)
+        a = simulate(src, dict(mode='matlab_compat_raw', velocity_m_s=-20))
+        b = simulate(src, dict(mode='matlab_compat_raw', velocity_m_s=20))
+        self.assertEqual(a['histogram'], b['histogram'])
+
+    def test_matlab_arrays_and_histogram_boundaries(self):
+        out = probability_fft(0.1, 0.1, dt_s=1e-9, duration_s=32e-9,
+                              dead_s=0, beat_hz=1e6, noise_amp=0,
+                              rng=np.random.default_rng(1))
+        self.assertEqual(len(out['q']), 32)
+        self.assertEqual(len(out['frequency_hz']), 32)  # 2N-1 is odd; MATLAB endpoint
+        np.testing.assert_array_equal(matlab_histogram(np.array([2e-9]),
+            np.array([0, 1e-9, 2e-9]), np.array([-1e-9, 0, 1e-9, 2e-9])), [0, 1, 2])
     def test_known_signed_velocities_and_repeatability(self):
         for velocity in (-8, 0, 8):
             with self.subTest(velocity=velocity):
@@ -114,7 +162,7 @@ class SourceContractTests(unittest.TestCase):
         self.folder = Path(self.temp.name)
         self.summary = self.folder / 'summary.json'
         self.summary.write_text(json.dumps({'global': {'wavelength_nm': 1550,
-            'instrument_parameters': {'pulse_width_s': 2e-7}}}), encoding='utf-8')
+            'instrument_parameters': {'pulse_width_s': 1e-6}}}), encoding='utf-8')
         (self.folder / 'rain_power.csv').write_text(
             'range_m,light_rain_power_signal_raw,light_rain_power_observed_raw\n100,1e-10,999\n200,2e-11,999\n', encoding='utf-8')
 

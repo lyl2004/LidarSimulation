@@ -811,6 +811,8 @@ def fig_hial_snr() -> dict:
 
 
 def fig_layered_power(log: bool) -> dict:
+    # Keep the data binding local; older cached UI bytecode referenced ``d``
+    # before assignment and caused a page-level NameError.
     d = load_csv_display("layered_atmosphere_power.csv")
     traces = []
     if d:
@@ -1689,7 +1691,7 @@ def _build_instrument_editor(g: dict) -> None:
     inst = g.get("instrument_parameters", {})
     _num("λ  (nm)",     g.get("wavelength_nm", 1550.0),         ("cli", "wavelength_nm"))
     _num("P₀  (W)",     inst.get("laser_peak_power_W", 50.0),   ("cli", "laser_peak_power_W"))
-    _num("τ  (s)",      inst.get("pulse_width_s", 2e-7),        ("cli", "pulse_width_s"), fmt="%.3e")
+    _num("τ  (s)",      inst.get("pulse_width_s", 1e-6),        ("cli", "pulse_width_s"), fmt="%.3e")
     _num("r  (m)",      inst.get("receiver_radius_m", 0.05),    ("cli", "receiver_radius_m"), fmt="%.4f")
     _num("η",           inst.get("optical_efficiency", 0.8),    ("cli", "optical_efficiency"), fmt="%.4f")
     ui.separator().classes("my-2")
@@ -2702,7 +2704,7 @@ async def _do_recompute(status_label: ui.label, log_buf: list,
 _DEFAULTS: dict = {
     # Instrument / CLI
     "laser_peak_power_W":   50.0,
-    "pulse_width_s":        2.0e-7,
+    "pulse_width_s":        1.0e-6,
     "receiver_radius_m":    0.05,
     "optical_efficiency":   0.8,
     "wavelength_nm":        1550.0,
@@ -3390,7 +3392,7 @@ def _apply_params_json(params: dict, summary: dict) -> None:
             if field == "laser_peak_power_W":
                 inp.value = saved.get("laser_peak_power_W", inst.get("laser_peak_power_W", 50.0))
             elif field == "pulse_width_s":
-                inp.value = saved.get("pulse_width_s", inst.get("pulse_width_s", 2e-7))
+                inp.value = saved.get("pulse_width_s", inst.get("pulse_width_s", 1e-6))
             elif field == "receiver_radius_m":
                 inp.value = saved.get("receiver_radius_m", inst.get("receiver_radius_m", 0.05))
             elif field == "optical_efficiency":

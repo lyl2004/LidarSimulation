@@ -84,6 +84,28 @@ class WindLayoutTests(unittest.TestCase):
         self.assertEqual(self.wind.histogram.options['series'], [])
         self.assertFalse(set(self.wind.inputs.values()) & set(demo._inputs.values()))
         self.assertGreaterEqual(len(self.callbacks), 13)
+        self.assertEqual(self.wind.request()['settings']['mode'], 'unified_event_mode')
+
+    def test_receiver_mode_is_carried_into_request_and_loads_defaults(self):
+        self.wind.mode.value = 'matlab_compat_corrected'
+        self.assertEqual(self.wind.request()['settings']['mode'], 'matlab_compat_corrected')
+        self.assertEqual(self.wind.request()['settings']['pulses'], 200)
+        # The checked-in default result bundle predates the 1 us pulse update,
+        # so request() safely clamps its untouched default to 200 ns.
+        self.assertEqual(self.wind.request()['settings']['window_ns'], 200)
+        self.wind.mode.value = 'matlab_compat_raw'
+        self.wind.mode_changed()
+        request = self.wind.request()
+        self.assertEqual(request['settings']['mode'], 'matlab_compat_raw')
+        self.assertEqual(request['settings']['window_ns'], 5000)
+        self.assertEqual(request['settings']['pulses'], 1)
+        self.wind.mode.value = 'unified_event_mode'
+        self.wind.mode_changed()
+
+    def test_layered_power_chart_has_no_undefined_data_symbol(self):
+        chart = demo.fig_layered_power(True)
+        self.assertIn('data', chart)
+        self.assertIn('layout', chart)
 
 
 class WindSubprocessTests(unittest.IsolatedAsyncioTestCase):
@@ -99,7 +121,7 @@ class WindSubprocessTests(unittest.IsolatedAsyncioTestCase):
             shutil.copy2(ROOT / 'src' / name, self.root / 'src' / name)
         self.summary_path = self.root / 'summary.json'
         self.summary_path.write_text(json.dumps({'global': {'wavelength_nm': 1550,
-            'instrument_parameters': {'pulse_width_s': 2e-7}}}), encoding='utf-8')
+            'instrument_parameters': {'pulse_width_s': 1e-6}}}), encoding='utf-8')
         (self.root / 'maritime_haze_power.csv').write_text('range_m,power_signal_raw\n1000,2e-11\n', encoding='utf-8')
         self.log = []
         with self.host:
@@ -131,6 +153,15 @@ class WindSubprocessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('已过期', self.wind.summary.text)
         self.assertFalse(self.wind.running)
         self.assertIsNone(self.wind.process)
+
+    async def test_corrected_default_clamps_to_legacy_source_pulse_width(self):
+        self.wind.mode.value = 'matlab_compat_corrected'
+        self.wind.mode_changed()
+        self.summary_path.write_text(json.dumps({'global': {'wavelength_nm': 1550,
+            'instrument_parameters': {'pulse_width_s': 2e-7}}}), encoding='utf-8')
+        request = self.wind.request()
+        self.assertEqual(request['settings']['window_ns'], 200)
+        self.assertEqual(self.wind.inputs['window_ns'].value, 200)
 
     async def test_cancel_releases_worker(self):
         self.wind.inputs['pulses'].value = 20000
